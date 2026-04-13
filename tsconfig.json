@@ -1,0 +1,24 @@
+{
+    "$schema": "https://json.schemastore.org/tsconfig",
+    "compilerOptions": {
+        "rootDir": "src",
+        "outDir": "dist",
+        "allowJs": true,
+        "allowSyntheticDefaultImports": true,
+        "strict": true,
+        "strictNullChecks": true,
+        "pretty": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true,
+        "isolatedModules": true,
+        "skipLibCheck": true,
+        "esModuleInterop": true,
+        "module": "ESNext",
+        "moduleResolution": "Bundler",
+        "target": "ES2022",
+        "typeRoots": ["src/types", "./node_modules/@types"],
+        "moduleDetection": "force"
+    },
+    "include": ["src/**/*.ts", ".eslintrc.cjs", ".commitlintrc.ts"],
+    "exclude": ["dist", "node_modules"]
+}

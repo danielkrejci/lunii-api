@@ -1,0 +1,1 @@
+ALTER TABLE "profile" ALTER COLUMN "birth_time" SET DATA TYPE time USING "birth_time"::time;

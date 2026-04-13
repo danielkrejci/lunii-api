@@ -1,0 +1,76 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1775673168200,
+      "tag": "0000_absent_mongoose",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1775676099596,
+      "tag": "0001_black_ultimatum",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1775677013568,
+      "tag": "0002_living_cardiac",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1775744841653,
+      "tag": "0003_lively_riptide",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1775755818178,
+      "tag": "0004_spicy_pestilence",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1775755998193,
+      "tag": "0005_sour_juggernaut",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1775756040920,
+      "tag": "0006_lowly_nekra",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1775759618994,
+      "tag": "0007_mysterious_the_phantom",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1775768602916,
+      "tag": "0008_remarkable_luminals",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1775771941333,
+      "tag": "0009_foamy_natasha_romanoff",
+      "breakpoints": true
+    }
+  ]
+}

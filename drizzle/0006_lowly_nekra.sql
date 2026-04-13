@@ -1,0 +1,1 @@
+ALTER TABLE "profile" ALTER COLUMN "birth_time" DROP NOT NULL;

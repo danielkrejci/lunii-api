@@ -1,0 +1,1 @@
+ALTER TABLE "profile" ADD COLUMN "personality_profile" text NOT NULL;
