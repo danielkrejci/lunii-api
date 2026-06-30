@@ -38,6 +38,7 @@ const fastify = Fastify({
                               colorize: true,
                               translateTime: "SYS:standard",
                               ignore: "pid,hostname",
+                              singleLine: true,
                           },
                       },
                   ],
@@ -48,13 +49,26 @@ const fastify = Fastify({
 
 // Configure CORS
 fastify.register(cors, {
-    origin: true,
+    origin: ["https://api.getlunii.cz", "https://api-dev.getlunii.cz"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-api-key", "User-Agent"],
+    methods: ["POST", "GET", "OPTIONS", "PUT", "DELETE", "PATCH"],
     credentials: true,
 });
 
 // Add schema validator and serializer
 fastify.setValidatorCompiler(validatorCompiler);
 fastify.setSerializerCompiler(serializerCompiler);
+
+// Cloudflare injects __cf_bm (and similar) as a separate Cookie header. Node
+// then joins multiple Cookie headers with ",", which better-auth's parser
+// can't read — only "; " is recognized. Normalize before any route handler
+// or auth.api.getSession() runs.
+fastify.addHook("onRequest", async (request) => {
+    const cookie = request.headers.cookie;
+    if (cookie && /,\s*[A-Za-z_]/.test(cookie)) {
+        request.headers.cookie = cookie.replace(/,\s*(?=[A-Za-z_])/g, "; ");
+    }
+});
 
 fastify.setErrorHandler((error, request, reply) => {
     if (hasZodFastifySchemaValidationErrors(error)) {

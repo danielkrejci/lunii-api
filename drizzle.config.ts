@@ -1,6 +1,6 @@
 import { Config, defineConfig } from "drizzle-kit";
 
-import { env } from "./src/env.mjs";
+import { env } from "./src/env";
 
 export default defineConfig({
     out: "./drizzle",

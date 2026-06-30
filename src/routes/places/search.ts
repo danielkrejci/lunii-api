@@ -3,7 +3,7 @@ import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { env } from "../../env.mjs";
+import { env } from "../../env";
 import { serializeDrizzleData } from "../../utils/drizzleUtils";
 
 export default (async (fastify) => {
