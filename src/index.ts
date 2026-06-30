@@ -107,6 +107,10 @@ fastify.register(autoLoad, {
     },
 });
 
+fastify.get("/", (_, reply) => {
+    reply.redirect("https://getlunii.com");
+});
+
 fastify.ready(async (err) => {
     if (err) {
         console.error("Fastify failed to load:", err);

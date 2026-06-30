@@ -4,7 +4,7 @@ import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import z from "zod";
 
-import { user } from "../db/schema";
+import { profile, user } from "../db/schema";
 import { auth } from "../lib/auth";
 
 export default (async (fastify: FastifyInstance) => {
@@ -50,9 +50,9 @@ export default (async (fastify: FastifyInstance) => {
 
             try {
                 await fastify.db
-                    .update(user)
+                    .update(profile)
                     .set({ notificationToken: request.body.token })
-                    .where(eq(user.id, session.user.id));
+                    .where(eq(profile.userId, session.user.id));
 
                 reply.status(200).send({
                     data: true,

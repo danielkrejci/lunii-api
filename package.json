@@ -5,7 +5,9 @@
     "scripts": {
         "clean-install": "PYTHON=$(brew --prefix python@3.11)/bin/python3.11 pnpm install",
         "reinstall": "rm -rf node_modules pnpm-lock.yaml && PYTHON=$(brew --prefix python@3.11)/bin/python3.11 pnpm install",
-        "dev": "tsx watch src/index.ts",
+        "dev": "concurrently -k \"pnpm dev:api\" \"pnpm dev:tunnel\"",
+        "dev:api": "tsx watch src/index.ts",
+        "dev:tunnel": "cloudflared tunnel run --url http://localhost:3000 lunii-dev",
         "build": "pnpm exec tsc",
         "migrate": "tsx dist/migrate.js",
         "start": "tsx dist/index.js",
@@ -48,6 +50,7 @@
         "@commitlint/cli": "^21.1.0",
         "@commitlint/config-conventional": "^21.1.0",
         "@types/pg": "^8.20.0",
+        "concurrently": "^10.0.3",
         "drizzle-kit": "0.31.10",
         "husky": "^9.1.7",
         "lint-staged": "^17.0.7",
