@@ -49,7 +49,7 @@ const fastify = Fastify({
 
 // Configure CORS
 fastify.register(cors, {
-    origin: ["https://api.getlunii.cz", "https://api-dev.getlunii.cz"],
+    origin: ["https://api.getlunii.com", "https://api-dev.getlunii.com"],
     allowedHeaders: ["Content-Type", "Authorization", "x-api-key", "User-Agent"],
     methods: ["POST", "GET", "OPTIONS", "PUT", "DELETE", "PATCH"],
     credentials: true,
