@@ -1,3 +1,5 @@
 allowBuilds:
-  esbuild: true
-  protobufjs: true
+    "@google/genai": true
+    esbuild: true
+    protobufjs: true
+    swisseph: true

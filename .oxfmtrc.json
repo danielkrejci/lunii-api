@@ -1,0 +1,10 @@
+{
+    "tabWidth": 4,
+    "printWidth": 120,
+    "trailingComma": "es5",
+    "semi": true,
+    "sortPackageJson": true,
+    "sortTailwindcss": true,
+    "sortImports": true,
+    "ignorePatterns": ["build", "coverage", "drizzle", "pnpm-lock.yaml"]
+}

@@ -1,10 +1,10 @@
+import placekit from "@placekit/client-js";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { env } from "../../env.mjs";
 
-import placekit from "@placekit/client-js";
-import { serializeDrizzleData } from "../../utils/serializeDrizzleData";
+import { env } from "../../env.mjs";
+import { serializeDrizzleData } from "../../utils/drizzleUtils";
 
 export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(

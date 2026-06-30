@@ -1,5 +1,49 @@
 import { relations } from "drizzle-orm";
-import { boolean, doublePrecision, index, pgTable, text, time, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import {
+    boolean,
+    date,
+    doublePrecision,
+    index,
+    jsonb,
+    numeric,
+    pgTable,
+    text,
+    time,
+    timestamp,
+    uniqueIndex,
+} from "drizzle-orm/pg-core";
+
+export const dailyInsights = pgTable(
+    "daily_insights",
+    {
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+        date: date("date", { mode: "string" }).notNull(),
+        focus: text("focus").array().notNull(),
+        caution: text("caution").array().notNull(),
+        do: text("do").notNull(),
+        avoid: text("avoid").notNull(),
+        horoscope: text("horoscope").notNull(),
+        moonInsight: text("moonInsight").notNull().default(""),
+        scoreLove: numeric("score_love").$type<number>().notNull().default(0),
+        scoreCareer: numeric("score_career").$type<number>().notNull().default(0),
+        scoreHealth: numeric("score_health").$type<number>().notNull().default(0),
+        scoreMood: numeric("score_mood").$type<number>().notNull().default(0),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        updatedAt: timestamp("updated_at")
+            .defaultNow()
+            .$onUpdate(() => /* @__PURE__ */ new Date())
+            .notNull(),
+    },
+    (table) => [uniqueIndex("daily_insights_user_id_date_idx").on(table.userId, table.date)]
+);
+
+export const transit = pgTable("transit", {
+    date: date("date", { mode: "string" }).primaryKey(),
+    planets: jsonb("planets").notNull(),
+    aspects: jsonb("aspects").notNull(),
+});
 
 export const profile = pgTable(
     "profile",
@@ -14,22 +58,27 @@ export const profile = pgTable(
             .unique(),
         name: text("name").notNull(),
         referrer: text("referrer"),
-        birthDate: timestamp("birth_date").notNull(),
+        birthDate: date("birth_date", { mode: "string" }).notNull(),
         birthTime: time("birth_time"),
         birthPlace: text("birth_place").notNull(),
         birthPlaceLat: doublePrecision("birth_place_lat").notNull(),
         birthPlaceLng: doublePrecision("birth_place_lng").notNull(),
         gender: text("gender").notNull(),
-        zodiacSign: text("zodiac_sign").notNull(),
+        sunSign: text("sun_sign").notNull(),
+        moonSign: text("moon_sign").notNull(),
+        risingSign: text("rising_sign").notNull(),
         relationshipStatus: text("relationship_status").notNull(),
         careerStage: text("career_stage").notNull(),
         decisionStyle: text("decision_style").notNull(),
-        areasOfInterest: text("areas_of_interest").notNull(),
-        goalsForTheYear: text("goals_for_the_year").notNull(),
+        areasOfInterest: text("areas_of_interest").array().notNull(),
+        goalsForTheYear: text("goals_for_the_year").array().notNull(),
         contentPreference: text("content_preference").notNull(),
         beliefLevel: text("belief_level").notNull(),
         personalityProfile: text("personality_profile").notNull(),
+        timezone: text("timezone").notNull(),
         notificationToken: text("notification_token"),
+        country: text("country").notNull(),
+        language: text("language").notNull(),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
             .defaultNow()

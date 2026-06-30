@@ -1,0 +1,1 @@
+ALTER TABLE "profile" ALTER COLUMN "personality_profile" SET DATA TYPE text;

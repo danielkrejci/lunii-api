@@ -1,4 +1,5 @@
 import fp from "fastify-plugin";
+
 import { auth } from "../lib/auth";
 
 export default fp(

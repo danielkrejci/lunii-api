@@ -1,7 +1,12 @@
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import autoLoad from "@fastify/autoload";
 import cors from "@fastify/cors";
 import formbody from "@fastify/formbody";
 import multipart from "@fastify/multipart";
+import { fastifySchedule } from "@fastify/schedule";
 import Fastify from "fastify";
 import {
     hasZodFastifySchemaValidationErrors,
@@ -10,9 +15,8 @@ import {
     validatorCompiler,
     ZodTypeProvider,
 } from "fastify-type-provider-zod";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+
+import { createTransitJob, executeTransitsGeneration } from "./modules/transits";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -76,6 +80,8 @@ fastify.register(formbody);
 
 fastify.register(multipart);
 
+fastify.register(fastifySchedule);
+
 fastify.register(autoLoad, {
     dir: join(__dirname, "plugins"),
 });
@@ -87,11 +93,22 @@ fastify.register(autoLoad, {
     },
 });
 
-fastify.ready((err) => {
+fastify.ready(async (err) => {
     if (err) {
         console.error("Fastify failed to load:", err);
         process.exit(1);
     }
+
+    // create transit job
+    const job = createTransitJob(fastify.db);
+
+    // add cron job
+    fastify.scheduler.addCronJob(job);
+
+    // immediate run
+    await executeTransitsGeneration(fastify.db);
+
+    // print available routes
     console.log(fastify.printRoutes());
 });
 

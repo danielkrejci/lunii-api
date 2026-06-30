@@ -1,6 +1,6 @@
 {
-  "id": "31edc1e2-f0ec-4eef-aff8-07c9f1a7c6f0",
-  "prevId": "5727274d-c130-4e17-bd1c-c30f9bf7fb18",
+  "id": "564fa501-0df5-4882-9c11-b351c29ddf20",
+  "prevId": "9f99adeb-10bc-4389-9e67-43c4a7454c25",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -103,12 +103,173 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "account_provider_providerAccountId_idx": {
+          "name": "account_provider_providerAccountId_idx",
+          "columns": [
+            {
+              "expression": "provider_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
         "account_user_id_user_id_fk": {
           "name": "account_user_id_user_id_fk",
           "tableFrom": "account",
+          "tableTo": "user",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.daily_insights": {
+      "name": "daily_insights",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "date": {
+          "name": "date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "focus": {
+          "name": "focus",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "caution": {
+          "name": "caution",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "do": {
+          "name": "do",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "avoid": {
+          "name": "avoid",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "horoscope": {
+          "name": "horoscope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "moonInsight": {
+          "name": "moonInsight",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "score_love": {
+          "name": "score_love",
+          "type": "numeric",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "score_career": {
+          "name": "score_career",
+          "type": "numeric",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "score_health": {
+          "name": "score_health",
+          "type": "numeric",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "score_mood": {
+          "name": "score_mood",
+          "type": "numeric",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "daily_insights_user_id_date_idx": {
+          "name": "daily_insights_user_id_date_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "daily_insights_user_id_user_id_fk": {
+          "name": "daily_insights_user_id_user_id_fk",
+          "tableFrom": "daily_insights",
           "tableTo": "user",
           "columnsFrom": [
             "user_id"
@@ -148,21 +309,39 @@
           "primaryKey": false,
           "notNull": true
         },
+        "referrer": {
+          "name": "referrer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "birth_date": {
           "name": "birth_date",
-          "type": "timestamp",
+          "type": "date",
           "primaryKey": false,
           "notNull": true
         },
         "birth_time": {
           "name": "birth_time",
-          "type": "text",
+          "type": "time",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "birth_place": {
           "name": "birth_place",
           "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "birth_place_lat": {
+          "name": "birth_place_lat",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "birth_place_lng": {
+          "name": "birth_place_lng",
+          "type": "double precision",
           "primaryKey": false,
           "notNull": true
         },
@@ -172,8 +351,20 @@
           "primaryKey": false,
           "notNull": true
         },
-        "zodiac_sign": {
-          "name": "zodiac_sign",
+        "sun_sign": {
+          "name": "sun_sign",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "moon_sign": {
+          "name": "moon_sign",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rising_sign": {
+          "name": "rising_sign",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -198,13 +389,13 @@
         },
         "areas_of_interest": {
           "name": "areas_of_interest",
-          "type": "text",
+          "type": "text[]",
           "primaryKey": false,
           "notNull": true
         },
         "goals_for_the_year": {
           "name": "goals_for_the_year",
-          "type": "text",
+          "type": "text[]",
           "primaryKey": false,
           "notNull": true
         },
@@ -220,26 +411,89 @@
           "primaryKey": false,
           "notNull": true
         },
+        "personality_profile": {
+          "name": "personality_profile",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "timezone": {
+          "name": "timezone",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "notification_token": {
           "name": "notification_token",
           "type": "text",
           "primaryKey": false,
           "notNull": false
         },
+        "country": {
+          "name": "country",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "language": {
+          "name": "language",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp",
           "primaryKey": false,
-          "notNull": true
+          "notNull": true,
+          "default": "now()"
         },
         "updated_at": {
           "name": "updated_at",
           "type": "timestamp",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true,
+          "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "profile_birth_place_lat_lng_idx": {
+          "name": "profile_birth_place_lat_lng_idx",
+          "columns": [
+            {
+              "expression": "birth_place_lat",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "birth_place_lng",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "profile_notification_token_idx": {
+          "name": "profile_notification_token_idx",
+          "columns": [
+            {
+              "expression": "notification_token",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "profile_user_id_user_id_fk": {
           "name": "profile_user_id_user_id_fk",
@@ -256,7 +510,15 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "profile_user_id_unique": {
+          "name": "profile_user_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "user_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -357,6 +619,37 @@
           ]
         }
       },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.transit": {
+      "name": "transit",
+      "schema": "",
+      "columns": {
+        "date": {
+          "name": "date",
+          "type": "date",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "planets": {
+          "name": "planets",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "aspects": {
+          "name": "aspects",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

@@ -3,10 +3,11 @@ import { betterAuth, BetterAuthOptions } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { anonymous, customSession } from "better-auth/plugins";
 import { desc, eq } from "drizzle-orm";
+
 import { db } from "../db";
 import * as schema from "../db/schema";
 import { profile } from "../db/schema";
-import { serializeDrizzleData } from "../utils/serializeDrizzleData";
+import { serializeDrizzleData } from "../utils/drizzleUtils";
 
 const config = {
     user: {

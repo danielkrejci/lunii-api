@@ -1,12 +1,19 @@
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
+import timezone from "dayjs/plugin/timezone.js";
+import utc from "dayjs/plugin/utc.js";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
+import { find as geoTz } from "geo-tz";
 import { z } from "zod";
+
 import { profile } from "../../db/schema";
 import { auth } from "../../lib/auth";
 
-const MIN_AGE = 15;
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
+export const MIN_AGE = 15;
 
 export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(
@@ -31,7 +38,11 @@ export default (async (fastify) => {
                     birthPlace: z.string().min(1, "Birth place is required"),
                     birthPlaceLat: z.number().refine((value) => String(value).length > 0, "Birth place is required"),
                     birthPlaceLng: z.number().refine((value) => String(value).length > 0, "Birth place is required"),
-                    zodiacSign: z.string().min(1, "Zodiac sign is required"),
+                    country: z.string().min(1, "Country is required"),
+                    language: z.string().min(1, "Language is required"),
+                    sunSign: z.string().min(1, "Sun sign is required"),
+                    moonSign: z.string().min(1, "Moon sign is required"),
+                    risingSign: z.string().min(1, "Rising sign is required"),
                     relationshipStatus: z.string().min(1, "Relationship status is required"),
                     careerStage: z.string().min(1, "Career stage is required"),
                     decisionStyle: z.string().min(1, "Decision style is required"),
@@ -78,17 +89,24 @@ export default (async (fastify) => {
             }
 
             try {
+                const detectedTimezone = geoTz(request.body.birthPlaceLat, request.body.birthPlaceLng)[0] || "UTC";
+
                 await fastify.db.insert(profile).values({
                     userId: session.user.id,
                     name: request.body.name,
                     referrer: request.body.referrer,
                     gender: request.body.gender,
-                    birthDate: dayjs(request.body.birthDate).toDate(),
+                    birthDate: request.body.birthDate,
                     birthTime: request.body.birthTime ? dayjs(request.body.birthTime).format("HH:mm") : null,
                     birthPlace: request.body.birthPlace,
                     birthPlaceLat: request.body.birthPlaceLat,
                     birthPlaceLng: request.body.birthPlaceLng,
-                    zodiacSign: request.body.zodiacSign,
+                    country: request.body.country,
+                    language: request.body.language,
+                    timezone: detectedTimezone,
+                    sunSign: request.body.sunSign,
+                    moonSign: request.body.moonSign,
+                    risingSign: request.body.risingSign,
                     relationshipStatus: request.body.relationshipStatus,
                     careerStage: request.body.careerStage,
                     decisionStyle: request.body.decisionStyle,

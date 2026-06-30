@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import z from "zod";
+
 import { user } from "../db/schema";
 import { auth } from "../lib/auth";
 
