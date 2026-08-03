@@ -1,10 +1,10 @@
-import { ai } from "../lib/ai";
-import { ZodiacSign } from "../utils/natalUtils";
-import { getLLMJson, parseLLMJson } from "../utils/stringUtils";
-import { ASPECT_PROFILES } from "./insights/aspectProfiles";
-import { PLANET_PROFILES } from "./insights/planetProfiles";
-import { SIGN_PROFILES } from "./insights/signProfiles";
-import { getMoonPhase } from "./transits";
+import { ai } from "../../lib/ai";
+import { ZodiacSign } from "../../utils/natalUtils";
+import { getLLMJson, parseLLMJson } from "../../utils/stringUtils";
+import { getMoonPhase } from "../transits";
+import { ASPECT_PROFILES } from "./aspectProfiles";
+import { PLANET_PROFILES } from "./planetProfiles";
+import { SIGN_PROFILES } from "./signProfiles";
 
 // ============================================================
 // ADVANCED ASTRO ENGINE
