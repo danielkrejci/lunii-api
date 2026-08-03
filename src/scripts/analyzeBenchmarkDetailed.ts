@@ -16,7 +16,10 @@ type BenchmarkResult = {
 async function main() {
     const text = await readFile("benchmark.ndjson", "utf8");
 
-    const results: BenchmarkResult[] = text.trim().split("\n").map(JSON.parse);
+    const results: BenchmarkResult[] = text
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
 
     console.log(`Results: ${results.length}\n`);
 

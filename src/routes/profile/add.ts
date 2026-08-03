@@ -12,7 +12,7 @@ import { profile } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { NatalChart } from "../../modules/compatibilityPeople/types";
 import { getPlanetPosition } from "../../modules/transits";
-import { Gender, Genders } from "../../utils/natalUtils";
+import { Gender, Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -51,9 +51,18 @@ export default (async (fastify) => {
                         .refine((value) => String(value).length > 0, "Please enter your birth place."),
                     country: z.string().min(1, "Please select your country."),
                     language: z.string().min(1, "Please select your preferred language."),
-                    sunSign: z.string().min(1, "Please select your Sun sign."),
-                    moonSign: z.string().min(1, "Please select your Moon sign."),
-                    risingSign: z.string().min(1, "Please select your Rising sign."),
+                    sunSign: z
+                        .string()
+                        .min(1, "Please select your Sun sign.")
+                        .refine((value) => SINGS_MAP.includes(value as ZodiacSign), "Invalid sign."),
+                    moonSign: z
+                        .string()
+                        .min(1, "Please select your Moon sign.")
+                        .refine((value) => SINGS_MAP.includes(value as ZodiacSign), "Invalid sign."),
+                    risingSign: z
+                        .string()
+                        .min(1, "Please select your Rising sign.")
+                        .refine((value) => SINGS_MAP.includes(value as ZodiacSign), "Invalid sign."),
                     relationshipStatus: z.string().min(1, "Please select the option that best suits you."),
                     careerStage: z.string().min(1, "Please select the option that best suits you."),
                     decisionStyle: z.string().min(1, "Please select the option that best suits you."),
@@ -136,7 +145,7 @@ export default (async (fastify) => {
                     userId: session.user.id,
                     name: request.body.name,
                     referrer: request.body.referrer,
-                    gender: request.body.gender,
+                    gender: request.body.gender as Gender,
                     birthDate: request.body.birthDate,
                     birthTime: request.body.birthTime ? dayjs(request.body.birthTime).format("HH:mm") : null,
                     birthPlace: request.body.birthPlace,
@@ -145,9 +154,9 @@ export default (async (fastify) => {
                     country: request.body.country,
                     language: request.body.language,
                     timezone: detectedTimezone,
-                    sunSign: request.body.sunSign,
-                    moonSign: request.body.moonSign,
-                    risingSign: request.body.risingSign,
+                    sunSign: request.body.sunSign as ZodiacSign,
+                    moonSign: request.body.moonSign as ZodiacSign,
+                    risingSign: request.body.risingSign as ZodiacSign,
                     relationshipStatus: request.body.relationshipStatus,
                     careerStage: request.body.careerStage,
                     decisionStyle: request.body.decisionStyle,

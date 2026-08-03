@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 
 import { db } from "../db";
 import { transit } from "../db/schema";
-import { calculateDailyCompatibility } from "../modules/compatibility";
+import { calculateDailyCompatibility } from "../modules/compatibilityZodiac/scoring";
 import { takeUniqueOrThrow } from "../utils/drizzleUtils";
 import { ZodiacSign } from "../utils/natalUtils";
 
@@ -54,7 +54,7 @@ export function calculateStatistics(values: number[]): Statistics {
         count: values.length,
 
         min: sorted[0],
-        max: sorted.at(-1),
+        max: sorted.at(-1) ?? 0,
 
         mean,
 
