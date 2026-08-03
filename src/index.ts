@@ -1,12 +1,22 @@
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
 import autoLoad from "@fastify/autoload";
 import cors from "@fastify/cors";
 import formbody from "@fastify/formbody";
 import multipart from "@fastify/multipart";
 import { fastifySchedule } from "@fastify/schedule";
+import dayjs from "dayjs";
+import isoWeek from "dayjs/plugin/isoWeek";
+import isSameOrBefore from "dayjs/plugin/isSameOrBefore";
+import isToday from "dayjs/plugin/isToday";
+import isTomorrow from "dayjs/plugin/isTomorrow";
+import isYesterday from "dayjs/plugin/isYesterday";
+import minMax from "dayjs/plugin/minMax";
+import timezone from "dayjs/plugin/timezone";
+import updateLocale from "dayjs/plugin/updateLocale";
+import utc from "dayjs/plugin/utc";
+import weekOfYear from "dayjs/plugin/weekOfYear";
 import Fastify from "fastify";
 import {
     hasZodFastifySchemaValidationErrors,
@@ -16,10 +26,22 @@ import {
     ZodTypeProvider,
 } from "fastify-type-provider-zod";
 
+import { MAX_IMAGE_SIZE } from "./lib/r2";
 import { createTransitJob, executeTransitsGeneration } from "./modules/transits";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+dayjs.extend(utc);
+dayjs.extend(isoWeek);
+dayjs.extend(weekOfYear);
+dayjs.extend(timezone);
+dayjs.extend(isToday);
+dayjs.extend(isTomorrow);
+dayjs.extend(isYesterday);
+dayjs.extend(minMax);
+dayjs.extend(updateLocale);
+dayjs.extend(isSameOrBefore);
+
+// oxlint-disable-next-line no-underscore-dangle
+const __dirname = import.meta.dirname;
 
 const require = createRequire(import.meta.url);
 
@@ -66,7 +88,7 @@ fastify.setSerializerCompiler(serializerCompiler);
 fastify.addHook("onRequest", async (request) => {
     const cookie = request.headers.cookie;
     if (cookie && /,\s*[A-Za-z_]/.test(cookie)) {
-        request.headers.cookie = cookie.replace(/,\s*(?=[A-Za-z_])/g, "; ");
+        request.headers.cookie = cookie.replaceAll(/,\s*(?=[A-Za-z_])/g, "; ");
     }
 });
 
@@ -80,6 +102,10 @@ fastify.setErrorHandler((error, request, reply) => {
     }
 
     if (isResponseSerializationError(error)) {
+        request.log.error(
+            { err: error, method: error.method, url: error.url, cause: error.cause },
+            "Response serialization error"
+        );
         return reply.status(500).send({
             error: {
                 message: "Internal Server Error",
@@ -87,12 +113,18 @@ fastify.setErrorHandler((error, request, reply) => {
         });
     }
 
+    request.log.error({ err: error }, "Unhandled request error");
+
     reply.send(error);
 });
 
 fastify.register(formbody);
 
-fastify.register(multipart);
+fastify.register(multipart, {
+    limits: {
+        fileSize: MAX_IMAGE_SIZE,
+    },
+});
 
 fastify.register(fastifySchedule);
 

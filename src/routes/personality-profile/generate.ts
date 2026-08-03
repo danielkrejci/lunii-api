@@ -6,8 +6,9 @@ import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { find as geoTz } from "geo-tz";
 import { z } from "zod";
 
+import { ai } from "../../lib/ai";
 import swisseph from "../../lib/swisseph";
-import { signs } from "../../utils/natalUtils";
+import { Gender, Genders, SINGS_MAP } from "../../utils/natalUtils";
 import { parseLLMJson } from "../../utils/stringUtils";
 import { MIN_AGE } from "../profile/add";
 
@@ -20,8 +21,11 @@ export default (async (fastify) => {
         {
             schema: {
                 body: z.object({
-                    language: z.string().min(1, "Language is required"),
-                    gender: z.string().min(1, "Gender is required"),
+                    language: z.string().min(1, "Please select your preferred language."),
+                    gender: z
+                        .string()
+                        .min(1, "Please select your gender.")
+                        .refine((value) => Genders.includes(value as Gender), "Invalid gender."),
                     birthDate: z.string().refine(
                         (date) => {
                             const today = new Date();
@@ -29,28 +33,32 @@ export default (async (fastify) => {
                             return new Date(date) <= minDate;
                         },
                         {
-                            message: `You must be at least ${MIN_AGE} years old`,
+                            message: `You must be at least ${MIN_AGE} years old.`,
                         }
                     ),
                     birthTime: z.string().nullable(),
-                    birthPlace: z.string().min(1, "Birth place is required"),
-                    birthPlaceLat: z.number().refine((value) => String(value).length > 0, "Birth place is required"),
-                    birthPlaceLng: z.number().refine((value) => String(value).length > 0, "Birth place is required"),
-                    country: z.string().min(1, "Country is required"),
-                    sunSign: z.string().min(1, "Sun sign is required"),
-                    relationshipStatus: z.string().min(1, "Relationship status is required"),
-                    careerStage: z.string().min(1, "Career stage is required"),
-                    decisionStyle: z.string().min(1, "Decision style is required"),
+                    birthPlace: z.string().min(1, "Please enter your birth place."),
+                    birthPlaceLat: z
+                        .number()
+                        .refine((value) => String(value).length > 0, "Please enter your birth place."),
+                    birthPlaceLng: z
+                        .number()
+                        .refine((value) => String(value).length > 0, "Please enter your birth place."),
+                    country: z.string().min(1, "Please select your country."),
+                    sunSign: z.string().min(1, "Please select your Sun sign."),
+                    relationshipStatus: z.string().min(1, "Please select the option that best suits you."),
+                    careerStage: z.string().min(1, "Please select the option that best suits you."),
+                    decisionStyle: z.string().min(1, "Please select the option that best suits you."),
                     areasOfInterest: z
                         .array(z.string())
-                        .min(1, "Areas of interest are required")
-                        .max(3, "Maximum 3 areas of interest"),
+                        .min(1, "Please select 1 to 3 options that best suit you.")
+                        .max(3, "You can select up to 3 areas of interest."),
                     goalsForTheYear: z
                         .array(z.string())
-                        .min(1, "Goals for the year are required")
-                        .max(3, "Maximum 3 goals for the year"),
-                    contentPreference: z.string().min(1, "Content preference is required"),
-                    beliefLevel: z.string().min(1, "Belief level is required"),
+                        .min(1, "Please select 1 to 3 goals for this year.")
+                        .max(3, "You can select up to 3 goals for this year."),
+                    contentPreference: z.string().min(1, "Please select your content preference."),
+                    beliefLevel: z.string().min(1, "Please select your belief level."),
                 }),
                 response: {
                     200: z.object({
@@ -59,6 +67,7 @@ export default (async (fastify) => {
                             moonSign: z.string(),
                             risingSign: z.string(),
                             personalityProfile: z.string(),
+                            personalityProfileInput: z.string(),
                         }),
                     }),
                     400: z.object({
@@ -107,7 +116,7 @@ export default (async (fastify) => {
                 return reply.status(400).send({ error: { message: "Moon sign not found" } });
             }
 
-            const moonSign = signs[Math.floor(moonResult.longitude / 30)];
+            const moonSign = SINGS_MAP[Math.floor(moonResult.longitude / 30)];
 
             // compute risign sign
             const jdRising = swisseph.swe_julday(
@@ -129,7 +138,7 @@ export default (async (fastify) => {
                 return reply.status(400).send({ error: { message: houses.error } });
             }
 
-            const risingSign = signs[Math.floor(houses.ascendant / 30)];
+            const risingSign = SINGS_MAP[Math.floor(houses.ascendant / 30)];
 
             // get personality profile from AI
             try {
@@ -186,14 +195,14 @@ export default (async (fastify) => {
                     - Spiritual belief level: ${request.body.beliefLevel}
                   `;
 
-                // const response = await ai.models.generateContent({
-                //     model: "gemini-2.5-flash",
-                //     contents: prompt,
-                // });
+                const response = await ai.models.generateContent({
+                    model: "gemini-2.5-flash",
+                    contents: prompt,
+                });
 
-                const response = {
-                    text: '{"core":"Vaše přirozenost se projevuje vnímavostí k okolním náladám a nenápadnou schopností splynout s prostředím. Intuitivně chápete nevyslovené.","emotions":"Váš emoční svět je hluboký a skrytý, intenzivně prožíváte pocity, které jen tak neukážete. Hledáte skutečnou intimitu a pravdu.","expression":"Navzdory vnitřní citlivosti působíte na ostatní přímočaře a energicky. Do nových věcí se pouštíte s elánem a sebedůvěrou.","relationships":"V partnerství toužíte po hluboké, transformativní vazbě založené na důvěře a sdílené intenzitě. Snažíte se o opravdové pochopení.","growth":"Vnitřní rozpor mezi citlivostí a ráznou vnější akcí je zdrojem růstu. Učíte se transformovat hluboké pocity v konstruktivní činy."}',
-                };
+                // const response = {
+                //     text: '{"core":"Vaše přirozenost se projevuje vnímavostí k okolním náladám a nenápadnou schopností splynout s prostředím. Intuitivně chápete nevyslovené.","emotions":"Váš emoční svět je hluboký a skrytý, intenzivně prožíváte pocity, které jen tak neukážete. Hledáte skutečnou intimitu a pravdu.","expression":"Navzdory vnitřní citlivosti působíte na ostatní přímočaře a energicky. Do nových věcí se pouštíte s elánem a sebedůvěrou.","relationships":"V partnerství toužíte po hluboké, transformativní vazbě založené na důvěře a sdílené intenzitě. Snažíte se o opravdové pochopení.","growth":"Vnitřní rozpor mezi citlivostí a ráznou vnější akcí je zdrojem růstu. Učíte se transformovat hluboké pocity v konstruktivní činy."}',
+                // };
 
                 const personalityProfile = parseLLMJson<{
                     core: string;
@@ -209,12 +218,12 @@ export default (async (fastify) => {
                     growth: "",
                 };
 
-                console.log({
-                    sunSign: request.body.sunSign.toLowerCase(),
-                    moonSign,
-                    risingSign,
-                    personalityProfile,
-                });
+                // console.log({
+                //     sunSign: request.body.sunSign.toLowerCase(),
+                //     moonSign,
+                //     risingSign,
+                //     personalityProfile,
+                // });
 
                 return reply.status(200).send({
                     data: {
@@ -222,6 +231,7 @@ export default (async (fastify) => {
                         moonSign,
                         risingSign,
                         personalityProfile: JSON.stringify(personalityProfile),
+                        personalityProfileInput: prompt,
                     },
                 });
             } catch (e: any) {

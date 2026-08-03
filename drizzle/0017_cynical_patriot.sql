@@ -1,0 +1,1 @@
+ALTER TABLE "compatibility_people_scores" ADD COLUMN "raw_input" text DEFAULT '' NOT NULL;

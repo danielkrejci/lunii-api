@@ -1,0 +1,1 @@
+ALTER TABLE "compatibility_people_scores" ADD COLUMN "insights" jsonb;

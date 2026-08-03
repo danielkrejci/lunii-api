@@ -1,0 +1,36 @@
+{
+    "$schema": "./node_modules/oxlint/configuration_schema.json",
+
+    "plugins": ["react", "react-perf", "typescript", "unicorn", "import"],
+
+    "env": {
+        "es2024": true
+    },
+
+    "categories": {
+        "correctness": "error",
+        "suspicious": "error",
+        "pedantic": "warn"
+    },
+
+    "rules": {
+        "no-unused-vars": [
+            "error",
+            {
+                "fix": {
+                    "imports": "safe-fix",
+                    "variables": "off"
+                }
+            }
+        ],
+        "unicorn/no-array-sort": "off",
+        "require-await": "off",
+        "react/react-in-jsx-scope": "off",
+        "react/self-closing-comp": "warn",
+        "import/max-dependencies": "off",
+        "max-lines-per-function": "off",
+        "max-lines": "off",
+        "react-hooks/rules-of-hooks": "error",
+        "react-hooks/exhaustive-deps": "warn"
+    }
+}

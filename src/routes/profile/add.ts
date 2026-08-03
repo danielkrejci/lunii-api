@@ -5,10 +5,14 @@ import utc from "dayjs/plugin/utc.js";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { find as geoTz } from "geo-tz";
+import swisseph from "swisseph";
 import { z } from "zod";
 
 import { profile } from "../../db/schema";
 import { auth } from "../../lib/auth";
+import { NatalChart } from "../../modules/compatibilityPeople/types";
+import { getPlanetPosition } from "../../modules/transits";
+import { Gender, Genders } from "../../utils/natalUtils";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -21,9 +25,12 @@ export default (async (fastify) => {
         {
             schema: {
                 body: z.object({
-                    name: z.string().min(1, "Name is required").max(60, "Name must be at most 60 characters long"),
-                    referrer: z.string().min(1, "Select where did you hear about us"),
-                    gender: z.string().min(1, "Gender is required"),
+                    name: z.string().min(1, "Please enter your name.").max(60, "Name must be 60 characters or fewer."),
+                    referrer: z.string().min(1, "Please select an option."),
+                    gender: z
+                        .string()
+                        .min(1, "Please select your gender.")
+                        .refine((value) => Genders.includes(value as Gender), "Invalid gender."),
                     birthDate: z.string().refine(
                         (date) => {
                             const today = new Date();
@@ -31,32 +38,36 @@ export default (async (fastify) => {
                             return new Date(date) <= minDate;
                         },
                         {
-                            message: `You must be at least ${MIN_AGE} years old`,
+                            message: `You must be at least ${MIN_AGE} years old.`,
                         }
                     ),
                     birthTime: z.string().nullable(),
-                    birthPlace: z.string().min(1, "Birth place is required"),
-                    birthPlaceLat: z.number().refine((value) => String(value).length > 0, "Birth place is required"),
-                    birthPlaceLng: z.number().refine((value) => String(value).length > 0, "Birth place is required"),
-                    country: z.string().min(1, "Country is required"),
-                    language: z.string().min(1, "Language is required"),
-                    sunSign: z.string().min(1, "Sun sign is required"),
-                    moonSign: z.string().min(1, "Moon sign is required"),
-                    risingSign: z.string().min(1, "Rising sign is required"),
-                    relationshipStatus: z.string().min(1, "Relationship status is required"),
-                    careerStage: z.string().min(1, "Career stage is required"),
-                    decisionStyle: z.string().min(1, "Decision style is required"),
+                    birthPlace: z.string().min(1, "Please enter your birth place."),
+                    birthPlaceLat: z
+                        .number()
+                        .refine((value) => String(value).length > 0, "Please enter your birth place."),
+                    birthPlaceLng: z
+                        .number()
+                        .refine((value) => String(value).length > 0, "Please enter your birth place."),
+                    country: z.string().min(1, "Please select your country."),
+                    language: z.string().min(1, "Please select your preferred language."),
+                    sunSign: z.string().min(1, "Please select your Sun sign."),
+                    moonSign: z.string().min(1, "Please select your Moon sign."),
+                    risingSign: z.string().min(1, "Please select your Rising sign."),
+                    relationshipStatus: z.string().min(1, "Please select the option that best suits you."),
+                    careerStage: z.string().min(1, "Please select the option that best suits you."),
+                    decisionStyle: z.string().min(1, "Please select the option that best suits you."),
                     areasOfInterest: z
                         .array(z.string())
-                        .min(1, "Areas of interest are required")
-                        .max(3, "Maximum 3 areas of interest"),
+                        .min(1, "Please select 1 to 3 options that best suit you.")
+                        .max(3, "You can select up to 3 areas of interest."),
                     goalsForTheYear: z
                         .array(z.string())
-                        .min(1, "Goals for the year are required")
-                        .max(3, "Maximum 3 goals for the year"),
-                    contentPreference: z.string().min(1, "Content preference is required"),
-                    beliefLevel: z.string().min(1, "Belief level is required"),
-                    personalityProfile: z.string().min(1, "Personality profile is required"),
+                        .min(1, "Please select 1 to 3 goals for this year.")
+                        .max(3, "You can select up to 3 goals for this year."),
+                    contentPreference: z.string().min(1, "Please select your content preference."),
+                    beliefLevel: z.string().min(1, "Please select your belief level."),
+                    personalityProfile: z.string().min(1, "Please select your personality profile."),
                 }),
                 response: {
                     200: z.object({
@@ -91,6 +102,36 @@ export default (async (fastify) => {
             try {
                 const detectedTimezone = geoTz(request.body.birthPlaceLat, request.body.birthPlaceLng)[0] || "UTC";
 
+                const birthDate = dayjs(request.body.birthDate);
+                const birthTime = request.body.birthTime ? dayjs(request.body.birthTime) : dayjs().hour(12).minute(0);
+
+                const absoluteBirthDate = dayjs
+                    .tz(birthDate.format("YYYY-MM-DD"), detectedTimezone)
+                    .hour(birthTime.hour())
+                    .minute(birthTime.minute())
+                    .second(0)
+                    .millisecond(0)
+                    .toDate();
+
+                const jd = swisseph.swe_julday(
+                    absoluteBirthDate.getUTCFullYear(),
+                    absoluteBirthDate.getUTCMonth() + 1,
+                    absoluteBirthDate.getUTCDate(),
+                    absoluteBirthDate.getUTCHours() + absoluteBirthDate.getUTCMinutes() / 60,
+                    swisseph.SE_GREG_CAL
+                );
+
+                // compute birth chart
+                const birthChart: NatalChart = {
+                    sun: getPlanetPosition(jd, swisseph.SE_SUN),
+                    moon: getPlanetPosition(jd, swisseph.SE_MOON),
+                    mercury: getPlanetPosition(jd, swisseph.SE_MERCURY),
+                    venus: getPlanetPosition(jd, swisseph.SE_VENUS),
+                    mars: getPlanetPosition(jd, swisseph.SE_MARS),
+                    jupiter: getPlanetPosition(jd, swisseph.SE_JUPITER),
+                    saturn: getPlanetPosition(jd, swisseph.SE_SATURN),
+                };
+
                 await fastify.db.insert(profile).values({
                     userId: session.user.id,
                     name: request.body.name,
@@ -115,6 +156,7 @@ export default (async (fastify) => {
                     contentPreference: request.body.contentPreference,
                     beliefLevel: request.body.beliefLevel,
                     personalityProfile: request.body.personalityProfile,
+                    birthChart,
                 });
 
                 reply.status(200).send({

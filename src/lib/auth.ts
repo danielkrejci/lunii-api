@@ -3,53 +3,125 @@ import { betterAuth, BetterAuthOptions } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { anonymous, customSession } from "better-auth/plugins";
 import { desc, eq } from "drizzle-orm";
+import { importPKCS8, SignJWT } from "jose";
 
 import { db } from "../db";
 import * as schema from "../db/schema";
 import { profile } from "../db/schema";
+import { env } from "../env";
 import { serializeDrizzleData } from "../utils/drizzleUtils";
+
+export async function generateAppleClientSecret() {
+    const key = await importPKCS8(env.APPLE_PRIVATE_KEY, "ES256");
+
+    const now = Math.floor(Date.now() / 1000);
+
+    return await new SignJWT({})
+        .setProtectedHeader({
+            alg: "ES256",
+            kid: env.APPLE_KEY_ID,
+        })
+        .setIssuer(env.APPLE_TEAM_ID)
+        .setSubject(env.APPLE_CLIENT_ID)
+        .setAudience("https://appleid.apple.com")
+        .setIssuedAt(now)
+        .setExpirationTime(now + 180 * 24 * 60 * 60)
+        .sign(key);
+}
 
 const config = {
     user: {
+        changeEmail: {
+            enabled: true,
+            updateEmailWithoutVerification: true,
+        },
         deleteUser: {
             enabled: true,
+        },
+    },
+    account: {
+        accountLinking: {
+            enabled: true,
+            allowDifferentEmails: true,
         },
     },
     plugins: [
         expo(),
         anonymous(),
+        // anonymous({
+        //     onLinkAccount: async ({ anonymousUser, newUser }) => {
+        //         // Deliberately not caught: the plugin deletes the anonymous user
+        //         // right after this resolves, and every user_id FK cascades. If the
+        //         // merge fails we want the whole callback to fail rather than let
+        //         // the user's data be silently deleted.
+        //         await linkAnonymousAccount(anonymousUser.user.id, newUser.user.id);
+        //     },
+        // }),
         customSession(async ({ user: sessionUser, session }) => {
-            const profileData = await db
-                .select()
-                .from(schema.profile)
-                .where(eq(profile.userId, sessionUser.id))
-                .orderBy(desc(profile.createdAt))
-                .limit(1);
+            try {
+                const profileData = await db
+                    .select()
+                    .from(schema.profile)
+                    .where(eq(profile.userId, sessionUser.id))
+                    .orderBy(desc(profile.createdAt))
+                    .limit(1);
 
-            if (profileData.length === 0) {
+                if (profileData.length === 0) {
+                    return {
+                        user: sessionUser,
+                        session,
+                        profile: null,
+                    };
+                }
+
+                return {
+                    user: sessionUser,
+                    session,
+                    profile: serializeDrizzleData(profileData[0]),
+                };
+            } catch (error) {
+                console.error("customSession: failed to load profile", error);
                 return {
                     user: sessionUser,
                     session,
                     profile: null,
                 };
             }
-
-            return {
-                user: sessionUser,
-                session,
-                profile: serializeDrizzleData(profileData[0]),
-            };
         }),
     ],
-    trustedOrigins: ["luniiapp://"],
+    trustedOrigins: [
+        "lunii://",
+        "exp://",
+        "https://appleid.apple.com",
+        "https://api-dev.getlunii.com",
+        "https://api.getlunii.com",
+    ],
     database: drizzleAdapter(db, {
         provider: "pg",
         schema: schema,
     }),
-
+    baseURL: env.BETTER_AUTH_URL,
+    socialProviders: {
+        // google: {
+        //     clientId: env.GOOGLE_CLIENT_ID,
+        //     clientSecret: env.GOOGLE_CLIENT_SECRET,
+        // },
+        apple: async () => ({
+            clientId: env.APPLE_CLIENT_ID,
+            clientSecret: await generateAppleClientSecret(),
+            appBundleIdentifier: env.APPLE_APP_BUNDLE_IDENTIFIER,
+        }),
+    },
     session: {
         expiresIn: 60 * 60 * 24 * 400,
         updateAge: 60 * 60 * 24,
+        cookieCache: {
+            enabled: true,
+            maxAge: 60 * 5,
+        },
+    },
+    logger: {
+        level: "debug",
     },
 } satisfies BetterAuthOptions;
 

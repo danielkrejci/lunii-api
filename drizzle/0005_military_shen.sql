@@ -1,0 +1,1 @@
+ALTER TABLE "compatibility_people" ADD COLUMN "birth_chart" jsonb;

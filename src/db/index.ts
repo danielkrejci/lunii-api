@@ -10,9 +10,14 @@ export const pool = new Pool({
     connectionString: env.POSTGRES_URL,
     max: 5,
     ssl: true,
+    keepAlive: true,
+    connectionTimeoutMillis: 10_000,
 });
 
-export const db = drizzle(pool, { schema });
+export const db = drizzle(pool, {
+    schema,
+    logger: process.env.NODE_ENV !== "production",
+});
 
 export type DbType = typeof db;
 
@@ -30,8 +35,7 @@ export function jsonbBuildObject<T extends Record<string, PgColumn | SQL>>(shape
         if (chunks.length > 0) {
             chunks.push(sql.raw(","));
         }
-        chunks.push(sql.raw(`'${key}',`));
-        chunks.push(sql`${value}`);
+        chunks.push(sql.raw(`'${key}',`), sql`${value}`);
     });
 
     return sql`jsonb_build_object(${sql.join(chunks)})`;

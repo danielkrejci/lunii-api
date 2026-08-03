@@ -1,0 +1,1 @@
+ALTER TABLE "profile" ALTER COLUMN "birth_chart" SET NOT NULL;

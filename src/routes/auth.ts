@@ -4,7 +4,7 @@ import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import z from "zod";
 
-import { profile, user } from "../db/schema";
+import { profile } from "../db/schema";
 import { auth } from "../lib/auth";
 
 export default (async (fastify: FastifyInstance) => {
@@ -75,8 +75,16 @@ export default (async (fastify: FastifyInstance) => {
 
     // sub-context for better-auth routes that need raw stream
     await fastify.register(async (childCtx) => {
-        // disable body parsing for this context so better-auth can handle the stream
-        childCtx.addContentTypeParser("application/json", (_request, _payload, done) => {
+        // better-auth reads the request body straight off req.raw, so no Fastify
+        // parser may consume the stream first. Overriding only application/json is
+        // not enough: Sign in with Apple uses response_mode=form_post and POSTs
+        // application/x-www-form-urlencoded to /auth/callback/apple, where the
+        // app-wide @fastify/formbody parser drains the stream. better-auth then
+        // sees an empty body, redirects to the GET callback without `state`, and
+        // fails with `state_not_found`. Drop every inherited parser in this scope
+        // and register a no-op catch-all that leaves req.raw untouched.
+        childCtx.removeAllContentTypeParsers();
+        childCtx.addContentTypeParser("*", (_request, _payload, done) => {
             done(null, null);
         });
 
@@ -84,7 +92,21 @@ export default (async (fastify: FastifyInstance) => {
             method: ["POST", "GET"],
             url: "/auth/*",
             handler: async (req, reply) => {
-                return await authHandler(req.raw, reply.raw);
+                // better-auth writes to the raw socket itself; take the reply away
+                // from Fastify so it never tries to send a second response.
+                reply.hijack();
+
+                try {
+                    await authHandler(req.raw, reply.raw);
+                } catch (error) {
+                    fastify.log.error({ err: error }, "better-auth handler failed");
+                    if (!reply.raw.headersSent) {
+                        reply.raw.writeHead(500, { "content-type": "application/json" });
+                    }
+                    if (!reply.raw.writableEnded) {
+                        reply.raw.end(JSON.stringify({ error: { message: "Internal Server Error" } }));
+                    }
+                }
             },
         });
     });

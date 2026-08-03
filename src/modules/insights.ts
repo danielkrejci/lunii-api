@@ -1,6 +1,9 @@
-import { transit } from "../db/schema";
 import { ai } from "../lib/ai";
-import { parseLLMJson } from "../utils/stringUtils";
+import { ZodiacSign } from "../utils/natalUtils";
+import { getLLMJson, parseLLMJson } from "../utils/stringUtils";
+import { ASPECT_PROFILES } from "./insights/aspectProfiles";
+import { PLANET_PROFILES } from "./insights/planetProfiles";
+import { SIGN_PROFILES } from "./insights/signProfiles";
 import { getMoonPhase } from "./transits";
 
 // ============================================================
@@ -24,20 +27,6 @@ export type Planet =
     | "neptune"
     | "pluto";
 
-export type ZodiacSign =
-    | "aries"
-    | "taurus"
-    | "gemini"
-    | "cancer"
-    | "leo"
-    | "virgo"
-    | "libra"
-    | "scorpio"
-    | "sagittarius"
-    | "capricorn"
-    | "aquarius"
-    | "pisces";
-
 export type AspectType = "conjunction" | "opposition" | "square" | "trine" | "sextile";
 
 export type ThemeCategory =
@@ -48,8 +37,6 @@ export type ThemeCategory =
     | "energetic"
     | "reflective"
     | "transformational";
-
-export type ThemePolarity = "light" | "shadow" | "neutral";
 
 export type LifeArea = "love" | "career" | "health" | "mood";
 
@@ -133,7 +120,17 @@ export type Theme =
     | "control"
     | "release"
     | "inner_shift"
-    | "hidden_tension";
+    | "hidden_tension"
+    | "compassion"
+    | "balance"
+    | "cooperation"
+    | "awareness"
+    | "challenge"
+    | "resilience"
+    | "ease"
+    | "flow"
+    | "focus"
+    | "intensity";
 
 /* ============================================================
    TRANSITS
@@ -155,190 +152,6 @@ export interface DailyTransits {
     aspects: TransitAspect[];
 }
 
-/* ============================================================
-   THEME META
-============================================================ */
-
-export interface ThemeDefinition {
-    category: ThemeCategory;
-    polarity: ThemePolarity;
-    intensity?: number;
-}
-
-export const THEME_META: Record<Theme, ThemeDefinition> = {
-    confidence: { category: "energetic", polarity: "light", intensity: 1.2 },
-    visibility: { category: "social", polarity: "light" },
-    self_expression: { category: "social", polarity: "light" },
-    clarity: { category: "mental", polarity: "light" },
-    identity: { category: "reflective", polarity: "neutral" },
-    motivation: { category: "energetic", polarity: "light", intensity: 1.2 },
-    recognition: { category: "social", polarity: "light" },
-
-    emotion: { category: "emotional", polarity: "neutral" },
-    sensitivity: { category: "emotional", polarity: "neutral" },
-    reflection: { category: "reflective", polarity: "neutral" },
-    comfort: { category: "emotional", polarity: "light" },
-    nostalgia: { category: "reflective", polarity: "neutral" },
-    intuition: { category: "reflective", polarity: "light" },
-    mood_shift: { category: "emotional", polarity: "neutral" },
-    emotional_need: { category: "emotional", polarity: "neutral" },
-
-    communication: { category: "social", polarity: "light" },
-    curiosity: { category: "mental", polarity: "light" },
-    mental_clarity: { category: "mental", polarity: "light" },
-    overthinking: { category: "mental", polarity: "shadow" },
-    analysis: { category: "mental", polarity: "neutral" },
-    conversation: { category: "social", polarity: "light" },
-    misunderstanding: { category: "social", polarity: "shadow" },
-    adaptability: { category: "social", polarity: "neutral" },
-
-    love: { category: "romantic", polarity: "light" },
-    connection: { category: "romantic", polarity: "light" },
-    attraction: { category: "romantic", polarity: "light" },
-    warmth: { category: "romantic", polarity: "light" },
-    romance: { category: "romantic", polarity: "light" },
-    beauty: { category: "romantic", polarity: "light" },
-    affection: { category: "romantic", polarity: "light" },
-    social_ease: { category: "social", polarity: "light" },
-
-    restlessness: { category: "energetic", polarity: "shadow" },
-    frustration: { category: "energetic", polarity: "shadow", intensity: 1.3 },
-    impulsiveness: { category: "energetic", polarity: "shadow" },
-    desire_for_progress: { category: "energetic", polarity: "light" },
-    conflict: { category: "social", polarity: "shadow", intensity: 1.3 },
-    energy: { category: "energetic", polarity: "light", intensity: 1.3 },
-    impatience: { category: "energetic", polarity: "shadow" },
-    assertiveness: { category: "energetic", polarity: "neutral" },
-
-    optimism: { category: "energetic", polarity: "light" },
-    growth: { category: "transformational", polarity: "light" },
-    possibility: { category: "transformational", polarity: "light" },
-    exploration: { category: "transformational", polarity: "light" },
-    freedom: { category: "transformational", polarity: "light" },
-    hope: { category: "emotional", polarity: "light" },
-    openness: { category: "social", polarity: "light" },
-
-    discipline: { category: "energetic", polarity: "neutral" },
-    pressure: { category: "energetic", polarity: "shadow" },
-    responsibility: { category: "reflective", polarity: "neutral" },
-    restraint: { category: "energetic", polarity: "shadow" },
-    seriousness: { category: "reflective", polarity: "neutral" },
-    fatigue: { category: "emotional", polarity: "shadow" },
-    patience: { category: "reflective", polarity: "light" },
-    stability: { category: "reflective", polarity: "light" },
-
-    change: { category: "transformational", polarity: "neutral" },
-    surprise: { category: "transformational", polarity: "neutral" },
-    rebellion: { category: "transformational", polarity: "shadow" },
-    instability: { category: "transformational", polarity: "shadow" },
-    breakthrough: { category: "transformational", polarity: "light" },
-    independence: { category: "transformational", polarity: "light" },
-    unpredictability: { category: "transformational", polarity: "shadow" },
-
-    dreaminess: { category: "emotional", polarity: "neutral" },
-    confusion: { category: "mental", polarity: "shadow" },
-    idealism: { category: "reflective", polarity: "light" },
-    fantasy: { category: "reflective", polarity: "neutral" },
-    escapism: { category: "emotional", polarity: "shadow" },
-    longing: { category: "emotional", polarity: "neutral" },
-    blurred_boundaries: { category: "mental", polarity: "shadow" },
-
-    transformation: { category: "transformational", polarity: "neutral" },
-    obsession: { category: "mental", polarity: "shadow" },
-    emotional_depth: { category: "emotional", polarity: "neutral" },
-    power: { category: "transformational", polarity: "neutral" },
-    control: { category: "transformational", polarity: "shadow" },
-    release: { category: "transformational", polarity: "light" },
-    inner_shift: { category: "reflective", polarity: "neutral" },
-    hidden_tension: { category: "emotional", polarity: "shadow" },
-};
-
-/* ============================================================
-   PLANET PROFILES
-============================================================ */
-
-interface PlanetThemeProfile {
-    primary: Theme[];
-    secondary: Theme[];
-    dominance: number;
-}
-
-export const PLANET_THEMES: Record<Planet, PlanetThemeProfile> = {
-    sun: {
-        primary: ["confidence", "identity", "visibility"],
-        secondary: ["motivation", "recognition"],
-        dominance: 1.4,
-    },
-    moon: {
-        primary: ["emotion", "sensitivity", "intuition"],
-        secondary: ["reflection", "comfort", "mood_shift"],
-        dominance: 1.5,
-    },
-    mercury: {
-        primary: ["communication", "analysis", "mental_clarity"],
-        secondary: ["conversation", "curiosity", "adaptability"],
-        dominance: 1.2,
-    },
-    venus: {
-        primary: ["love", "connection", "warmth"],
-        secondary: ["romance", "affection", "attraction"],
-        dominance: 1.3,
-    },
-    mars: {
-        primary: ["energy", "assertiveness", "motivation"],
-        secondary: ["conflict", "impatience", "restlessness"],
-        dominance: 1.4,
-    },
-    jupiter: {
-        primary: ["growth", "optimism", "possibility"],
-        secondary: ["hope", "exploration", "freedom"],
-        dominance: 1.2,
-    },
-    saturn: {
-        primary: ["discipline", "responsibility", "stability"],
-        secondary: ["pressure", "fatigue", "restraint"],
-        dominance: 1.5,
-    },
-    uranus: {
-        primary: ["change", "breakthrough", "independence"],
-        secondary: ["instability", "rebellion", "surprise"],
-        dominance: 1.2,
-    },
-    neptune: {
-        primary: ["dreaminess", "intuition", "idealism"],
-        secondary: ["confusion", "escapism", "fantasy"],
-        dominance: 1.3,
-    },
-    pluto: {
-        primary: ["transformation", "power", "emotional_depth"],
-        secondary: ["obsession", "control", "inner_shift"],
-        dominance: 1.5,
-    },
-};
-
-/* ============================================================
-   SIGN MODIFIERS
-============================================================ */
-
-export const SIGN_THEME_MODIFIERS: Record<ZodiacSign, Theme[]> = {
-    aries: ["energy", "assertiveness", "impulsiveness"],
-    taurus: ["comfort", "stability", "patience"],
-    gemini: ["communication", "curiosity", "adaptability"],
-    cancer: ["emotion", "comfort", "sensitivity"],
-    leo: ["confidence", "visibility", "recognition"],
-    virgo: ["analysis", "discipline", "mental_clarity"],
-    libra: ["connection", "romance", "social_ease"],
-    scorpio: ["transformation", "obsession", "emotional_depth"],
-    sagittarius: ["growth", "exploration", "freedom"],
-    capricorn: ["discipline", "responsibility", "pressure"],
-    aquarius: ["change", "rebellion", "independence"],
-    pisces: ["dreaminess", "intuition", "escapism"],
-};
-
-/* ============================================================
-   ASPECT WEIGHTS
-============================================================ */
-
 export const ASPECT_WEIGHTS: Record<AspectType, number> = {
     conjunction: 1.4,
     opposition: 1.3,
@@ -356,23 +169,11 @@ export function getOrbMultiplier(orb: number) {
 }
 
 /* ============================================================
-   SPECIAL ASPECT THEMES
+   RESULT TYPES
 ============================================================ */
 
-function aspectKey(a: Planet, b: Planet, type: AspectType) {
-    return [a, b].sort().join("-") + "-" + type;
-}
-
-export const ASPECT_THEME_MAP: Record<string, Theme[]> = {
-    [aspectKey("mars", "saturn", "square")]: ["frustration", "pressure", "restraint"],
-    [aspectKey("moon", "neptune", "opposition")]: ["confusion", "dreaminess", "longing"],
-    [aspectKey("venus", "jupiter", "trine")]: ["romance", "warmth", "optimism"],
-    [aspectKey("sun", "pluto", "conjunction")]: ["transformation", "power", "inner_shift"],
-    [aspectKey("mercury", "uranus", "conjunction")]: ["breakthrough", "change", "mental_clarity"],
-};
-
 /* ============================================================
-   RESULT TYPES
+   THEME SCORING
 ============================================================ */
 
 export interface ThemeScore {
@@ -380,231 +181,120 @@ export interface ThemeScore {
     score: number;
 }
 
-export interface PlanetDominance {
-    planet: Planet;
-    score: number;
-}
-
-export interface AspectDominance {
-    label: string;
-    score: number;
-}
-
-export interface EnergyProfile {
-    emotional: number;
-    social: number;
-    mental: number;
-    romantic: number;
-    energetic: number;
-    reflective: number;
-    transformational: number;
-}
-
-export interface PolarityProfile {
-    light: number;
-    shadow: number;
-    neutral: number;
-}
-
-/* ============================================================
-   PLANET DOMINANCE
-============================================================ */
-
-export function calculatePlanetDominance(transits: DailyTransits): PlanetDominance[] {
-    const result: Partial<Record<Planet, number>> = {};
-
-    Object.keys(transits.planets).forEach((planetName) => {
-        const planet = planetName as Planet;
-
-        result[planet] = PLANET_THEMES[planet].dominance;
-    });
-
-    transits.aspects.forEach((aspect) => {
-        const weight = ASPECT_WEIGHTS[aspect.type] * getOrbMultiplier(aspect.orb);
-
-        aspect.planets.forEach((planet) => {
-            result[planet] = (result[planet] || 0) + weight;
-        });
-    });
-
-    return Object.entries(result)
-        .map(([planet, score]) => ({
-            planet: planet as Planet,
-            score: Number(score),
-        }))
-        .sort((a, b) => b.score - a.score);
-}
-
-/* ============================================================
-   ASPECT DOMINANCE
-============================================================ */
-
-export function calculateAspectDominance(transits: DailyTransits): AspectDominance[] {
-    return transits.aspects
-        .map((aspect) => {
-            const score = ASPECT_WEIGHTS[aspect.type] * getOrbMultiplier(aspect.orb);
-
-            return {
-                label: `${aspect.planets[0]} ${aspect.type} ${aspect.planets[1]}`,
-                score,
-            };
-        })
-        .sort((a, b) => b.score - a.score);
-}
-
-/* ============================================================
-   THEME SCORING
-============================================================ */
-
-export function scoreThemes(transits: DailyTransits): ThemeScore[] {
+export function scoreThemes(influences: ProfileInfluence[]): ThemeScore[] {
     const scores: Partial<Record<Theme, number>> = {};
 
     function add(theme: Theme, value: number) {
-        scores[theme] = (scores[theme] || 0) + value;
+        scores[theme] = (scores[theme] ?? 0) + value;
     }
 
-    /* ========================================================
-       PLANETS
-    ======================================================== */
-
-    Object.entries(transits.planets).forEach(([planetName, planetData]) => {
-        const planet = planetName as Planet;
-
-        const profile = PLANET_THEMES[planet];
-
-        profile.primary.forEach((theme) => {
-            add(theme, 2 * profile.dominance);
-        });
-
-        profile.secondary.forEach((theme) => {
-            add(theme, 1 * profile.dominance);
-        });
-
-        /* =================================================
-               SIGN THEMES
-            ================================================= */
-
-        const signThemes = SIGN_THEME_MODIFIERS[planetData.sign];
-
-        signThemes.forEach((theme) => {
-            add(theme, 0.8);
-        });
-    });
-
-    /* ========================================================
-       ASPECTS
-    ======================================================== */
-
-    transits.aspects.forEach((aspect) => {
-        const weight = ASPECT_WEIGHTS[aspect.type] * getOrbMultiplier(aspect.orb);
-
-        aspect.planets.forEach((planet) => {
-            const profile = PLANET_THEMES[planet];
-
-            profile.primary.forEach((theme) => {
-                add(theme, weight * 1.8);
-            });
-
-            profile.secondary.forEach((theme) => {
-                add(theme, weight);
-            });
-        });
-
-        const key = aspectKey(aspect.planets[0], aspect.planets[1], aspect.type);
-
-        const specialThemes = ASPECT_THEME_MAP[key];
-
-        if (specialThemes) {
-            specialThemes.forEach((theme) => {
-                add(theme, weight * 2.5);
-            });
+    for (const influence of influences) {
+        for (const theme of influence.profile.themes) {
+            add(theme, influence.score);
         }
-    });
+    }
 
     return Object.entries(scores)
         .map(([theme, score]) => ({
             theme: theme as Theme,
-            score: Number(score),
+            score,
         }))
         .sort((a, b) => b.score - a.score);
 }
 
-/* ============================================================
-   ENERGY PROFILE
-============================================================ */
+export interface EnergyProfile {
+    activity: number;
+    emotion: number;
+    intellect: number;
+    spirituality: number;
+}
 
-export function buildEnergyProfile(scores: ThemeScore[]): EnergyProfile {
+export function aggregateEnergy(influences: ProfileInfluence[]): EnergyProfile {
     const result: EnergyProfile = {
-        emotional: 0,
-        social: 0,
-        mental: 0,
-        romantic: 0,
-        energetic: 0,
-        reflective: 0,
-        transformational: 0,
+        activity: 0,
+        emotion: 0,
+        intellect: 0,
+        spirituality: 0,
     };
 
-    scores.forEach(({ theme, score }) => {
-        const meta = THEME_META[theme];
+    for (const influence of influences) {
+        if (influence.type !== "planet") {
+            continue;
+        }
 
-        const intensity = meta.intensity ?? 1;
-
-        result[meta.category] += score * intensity;
-    });
+        result.activity += influence.profile.energy.activity * influence.score;
+        result.emotion += influence.profile.energy.emotion * influence.score;
+        result.intellect += influence.profile.energy.intellect * influence.score;
+        result.spirituality += influence.profile.energy.spirituality * influence.score;
+    }
 
     return result;
 }
 
-/* ============================================================
-   POLARITY PROFILE
-============================================================ */
-
-export function buildPolarityProfile(scores: ThemeScore[]): PolarityProfile {
-    const result: PolarityProfile = {
-        light: 0,
-        shadow: 0,
-        neutral: 0,
+export function aggregateLifeAreas(influences: ProfileInfluence[]): AreaScore[] {
+    const totals: Record<LifeArea, number> = {
+        love: 0,
+        career: 0,
+        health: 0,
+        mood: 0,
     };
 
-    scores.forEach(({ theme, score }) => {
-        const meta = THEME_META[theme];
+    for (const influence of influences) {
+        if (influence.type !== "planet") {
+            continue;
+        }
 
-        result[meta.polarity] += score;
-    });
+        const lifeAreas = influence.profile.lifeAreas;
 
-    return result;
+        if (!lifeAreas) {
+            continue;
+        }
+
+        for (const area of Object.keys(lifeAreas) as LifeArea[]) {
+            totals[area] += (lifeAreas[area] ?? 0) * influence.score;
+        }
+    }
+
+    const max = Math.max(...Object.values(totals), 1);
+
+    return (Object.keys(totals) as LifeArea[]).map((area) => ({
+        area,
+        score: Math.round((totals[area] / max) * 100),
+    }));
 }
 
-/* ============================================================
-   DOMINANT ENERGY
-============================================================ */
+export type EnergyDimension = "activity" | "emotion" | "intellect" | "spirituality";
 
-export function getDominantEnergy(energy: EnergyProfile): ThemeCategory {
-    return Object.entries(energy).sort((a, b) => b[1] - a[1])[0][0] as ThemeCategory;
+export function getDominantEnergy(energy: EnergyProfile): EnergyDimension {
+    return Object.entries(energy).sort((a, b) => b[1] - a[1])[0][0] as EnergyDimension;
 }
 
-/* ============================================================
-   ATMOSPHERE
-============================================================ */
-
-export function deriveAtmosphere(input: { energy: EnergyProfile; polarity: PolarityProfile; dominantPlanet: Planet }) {
+export function deriveAtmosphere(input: { energy: EnergyProfile; dominantPlanet?: DominantPlanet }) {
     const dominantEnergy = getDominantEnergy(input.energy);
-
-    const total = input.polarity.light + input.polarity.shadow + input.polarity.neutral;
-
-    const shadowRatio = input.polarity.shadow / total;
 
     let emotionalTone = "balanced";
 
-    if (shadowRatio >= 0.45) {
-        emotionalTone = "tense";
-    } else if (shadowRatio <= 0.2) {
-        emotionalTone = "open";
+    switch (dominantEnergy) {
+        case "activity":
+            emotionalTone = "dynamic";
+            break;
+
+        case "emotion":
+            emotionalTone = "sensitive";
+            break;
+
+        case "intellect":
+            emotionalTone = "thoughtful";
+            break;
+
+        case "spirituality":
+            emotionalTone = "introspective";
+            break;
     }
 
-    let planetaryAtmosphere = "emotionally active";
+    let planetaryAtmosphere = "balanced";
 
-    switch (input.dominantPlanet) {
+    switch (input.dominantPlanet?.planet) {
         case "venus":
             planetaryAtmosphere = "socially open";
             break;
@@ -614,11 +304,11 @@ export function deriveAtmosphere(input: { energy: EnergyProfile; polarity: Polar
             break;
 
         case "saturn":
-            planetaryAtmosphere = "heavy and reflective";
+            planetaryAtmosphere = "serious and reflective";
             break;
 
         case "neptune":
-            planetaryAtmosphere = "foggy and emotional";
+            planetaryAtmosphere = "dreamlike and intuitive";
             break;
 
         case "pluto":
@@ -628,13 +318,28 @@ export function deriveAtmosphere(input: { energy: EnergyProfile; polarity: Polar
         case "moon":
             planetaryAtmosphere = "emotionally heightened";
             break;
+
+        case "sun":
+            planetaryAtmosphere = "confident and expressive";
+            break;
+
+        case "mercury":
+            planetaryAtmosphere = "mentally active";
+            break;
+
+        case "jupiter":
+            planetaryAtmosphere = "optimistic and expansive";
+            break;
+
+        case "uranus":
+            planetaryAtmosphere = "unexpected and innovative";
+            break;
     }
 
     return {
         dominantEnergy,
         emotionalTone,
         planetaryAtmosphere,
-        shadowRatio,
     };
 }
 
@@ -642,120 +347,9 @@ export function deriveAtmosphere(input: { energy: EnergyProfile; polarity: Polar
    AREA SCORES
 ============================================================ */
 
-interface AreaWeights {
-    positive: Partial<Record<Theme, number>>;
-    negative: Partial<Record<Theme, number>>;
-}
-
 export interface AreaScore {
     area: LifeArea;
     score: number;
-}
-
-export const AREA_WEIGHTS: Record<LifeArea, AreaWeights> = {
-    love: {
-        positive: {
-            love: 3,
-            connection: 3,
-            warmth: 2,
-            affection: 2,
-            romance: 3,
-            attraction: 2,
-            social_ease: 1,
-            communication: 1,
-        },
-
-        negative: {
-            conflict: 3,
-            misunderstanding: 3,
-            impatience: 2,
-            restlessness: 2,
-            hidden_tension: 2,
-            overthinking: 1,
-        },
-    },
-    career: {
-        positive: {
-            motivation: 3,
-            discipline: 3,
-            clarity: 2,
-            mental_clarity: 2,
-            confidence: 2,
-            growth: 2,
-            recognition: 2,
-            stability: 1,
-            responsibility: 2,
-        },
-        negative: {
-            pressure: 3,
-            fatigue: 3,
-            confusion: 2,
-            impulsiveness: 2,
-            frustration: 2,
-            instability: 2,
-        },
-    },
-    health: {
-        positive: {
-            stability: 3,
-            patience: 2,
-            comfort: 2,
-            discipline: 2,
-        },
-        negative: {
-            fatigue: 4,
-            pressure: 3,
-            escapism: 2,
-            restlessness: 2,
-            impatience: 2,
-            hidden_tension: 2,
-        },
-    },
-    mood: {
-        positive: {
-            optimism: 3,
-            hope: 2,
-            comfort: 2,
-            confidence: 2,
-            openness: 2,
-        },
-        negative: {
-            confusion: 3,
-            emotional_need: 2,
-            longing: 2,
-            hidden_tension: 2,
-            mood_shift: 2,
-            overthinking: 2,
-            frustration: 2,
-            fatigue: 2,
-        },
-    },
-};
-
-export function calculateAreaScores(scores: ThemeScore[]): AreaScore[] {
-    const result: AreaScore[] = [];
-
-    for (const [area, weights] of Object.entries(AREA_WEIGHTS)) {
-        let positive = 0;
-        let negative = 0;
-
-        scores.forEach(({ theme, score }) => {
-            positive += score * (weights.positive[theme] ?? 0);
-
-            negative += score * (weights.negative[theme] ?? 0);
-        });
-
-        const raw = 50 + positive * 2.5 - negative * 2.5;
-
-        const normalized = Math.max(0, Math.min(100, Math.round(raw)));
-
-        result.push({
-            area: area as LifeArea,
-            score: normalized,
-        });
-    }
-
-    return result;
 }
 
 /* ============================================================
@@ -859,50 +453,131 @@ export const OBSERVATION_SEEDS: Partial<Record<Theme, string[]>> = {
     ],
 };
 
+export const MOON_SIGN_INFLUENCE: Record<ZodiacSign, string> = {
+    aries: "Emotions become more immediate and direct. Acting on instinct may feel more natural than waiting.",
+
+    taurus: "Comfort, stability and familiar surroundings become more important. Small pleasures can feel especially rewarding.",
+
+    gemini: "Curiosity increases and conversations become more stimulating. New ideas are easier to explore than commit to.",
+
+    cancer: "Emotional needs become more noticeable. Home, family and familiar people may feel especially important.",
+
+    leo: "Confidence and self-expression come more naturally. Appreciation and genuine recognition can have a stronger impact than usual.",
+
+    virgo: "Attention shifts toward details, routines and practical improvements. Small adjustments may feel surprisingly satisfying.",
+
+    libra: "Harmony, balance and cooperation become more valuable. Relationships often benefit from patience and compromise.",
+
+    scorpio:
+        "Emotions become deeper and more private. Hidden motivations or unspoken feelings may be easier to recognize.",
+
+    sagittarius:
+        "Optimism grows and routine feels less appealing. New experiences, ideas or perspectives may become especially attractive.",
+
+    capricorn:
+        "Responsibility and long-term thinking naturally take priority. Steady progress feels more rewarding than quick results.",
+
+    aquarius:
+        "Independent thinking becomes stronger. Looking at situations from a different perspective may bring useful insights.",
+
+    pisces: "Sensitivity and intuition become more noticeable. Subtle emotions and unspoken signals may be easier to recognize.",
+};
+
+export const MOON_PHASE_INFLUENCE: Record<string, string> = {
+    "New Moon": "A good time for quiet beginnings, setting intentions and creating space for something new.",
+
+    "Waxing Crescent": "Momentum is gradually building. Small actions today can create meaningful progress.",
+
+    "First Quarter": "Today's energy favors decisions, action and overcoming small obstacles instead of waiting.",
+
+    "Waxing Gibbous":
+        "Progress comes through patience and refinement. Finishing details may be more rewarding than starting something new.",
+
+    "Full Moon":
+        "Feelings and situations become more visible. What has been developing beneath the surface may become easier to understand.",
+
+    "Waning Gibbous": "Reflection and sharing become more valuable. Recent experiences can offer useful perspective.",
+
+    "Last Quarter":
+        "Letting go of unnecessary pressure creates room for better decisions. Adjustment is often more useful than persistence.",
+
+    "Waning Crescent":
+        "Slowing down, resting and reflecting may feel more natural than pushing forward. Give yourself space before the next beginning.",
+};
+
+export interface DominantPlanet {
+    planet: Planet;
+    score: number;
+    profile: AstrologicalProfile;
+}
+
+export function getDominantPlanets(influences: ProfileInfluence[], limit = 5): DominantPlanet[] {
+    return influences
+        .filter((i): i is PlanetInfluence => i.type === "planet")
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map((i) => ({
+            planet: i.id as Planet,
+            score: i.score,
+            profile: i.profile,
+        }));
+}
+
+export interface DominantAspect {
+    aspect: AspectType;
+    score: number;
+    profile: AspectProfile;
+    source?: TransitAspect;
+}
+
+export function getDominantAspects(influences: ProfileInfluence[], limit = 5): DominantAspect[] {
+    return influences
+        .filter((i): i is AspectInfluence => i.type === "aspect")
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map((i) => ({
+            aspect: i.id as AspectType,
+            score: i.score,
+            profile: i.profile,
+            source: i.source,
+        }));
+}
+
 /* ============================================================
    MAIN ANALYSIS
 ============================================================ */
-
 export function analyzeTransits(transits: DailyTransits) {
-    const themeScores = scoreThemes(transits);
+    const influences = collectInfluences(transits);
 
-    const energy = buildEnergyProfile(themeScores);
+    const context = buildInterpretationContext(influences);
 
-    const polarity = buildPolarityProfile(themeScores);
-
-    const planetDominance = calculatePlanetDominance(transits);
-
-    const aspectDominance = calculateAspectDominance(transits);
-
-    const dominantPlanet = planetDominance[0]?.planet ?? "moon";
+    const dominantPlanet = context.dominantPlanets[0];
 
     const atmosphere = deriveAtmosphere({
-        energy,
-        polarity,
+        energy: context.energy,
         dominantPlanet,
     });
 
-    const areaScores = calculateAreaScores(themeScores);
-
-    const observations = generateObservations(themeScores);
+    const observations = generateObservations(context.themes);
 
     const moonPlacement = transits.planets.moon.sign;
 
     const moonPhase = getMoonPhase(transits.planets.sun.longitude, transits.planets.moon.longitude);
 
+    const lunarInfluence = `${MOON_SIGN_INFLUENCE[moonPlacement]} ${MOON_PHASE_INFLUENCE[moonPhase]}`;
+
     return {
-        topThemes: themeScores.slice(0, 10),
-        energy,
-        polarity,
-        dominantPlanet,
-        dominantAspects: aspectDominance.slice(0, 5),
+        context,
+
+        moon: {
+            sign: moonPlacement,
+            phase: moonPhase,
+            influence: lunarInfluence,
+        },
+
         atmosphere,
-        areaScores,
-        planetDominance,
-        themeScores,
+
         observations,
-        moonPlacement,
-        moonPhase,
     };
 }
 
@@ -920,296 +595,1101 @@ export function buildPrompt(input: {
 }) {
     const { analysis, sunSign, moonSign, language, relationshipStatus, priorities } = input;
 
-    const topThemes = analysis.topThemes.slice(0, 6).map((x) => x.theme);
+    const {
+        themes,
+        energy,
+        lifeAreas,
+        dominantPlanets,
+        dominantAspects,
+        behavior,
+        guidance,
+        opportunities,
+        challenges,
+    } = analysis.context;
 
-    const topAspects = analysis.dominantAspects.slice(0, 3).map((x) => x.label);
+    const dominantPlanet = dominantPlanets[0];
 
-    const loveScore = analysis.areaScores.find((x) => x.area === "love")?.score ?? 50;
+    const loveScore = lifeAreas.find((x) => x.area === "love")?.score ?? 50;
 
-    const careerScore = analysis.areaScores.find((x) => x.area === "career")?.score ?? 50;
+    const careerScore = lifeAreas.find((x) => x.area === "career")?.score ?? 50;
 
-    const healthScore = analysis.areaScores.find((x) => x.area === "health")?.score ?? 50;
+    const healthScore = lifeAreas.find((x) => x.area === "health")?.score ?? 50;
 
-    const moodScore = analysis.areaScores.find((x) => x.area === "mood")?.score ?? 50;
+    const moodScore = lifeAreas.find((x) => x.area === "mood")?.score ?? 50;
 
     return `
-        Write a daily horoscope.
+You are writing a premium daily horoscope for a modern astrology application.
 
-        The horoscope should sound like something a real person would genuinely think or notice during the day.
+Your task is to translate today's astrological influences into a believable, engaging and realistic description of the user's day.
 
-        The horoscope should feel:
-        - observational
-        - grounded
-        - socially realistic
-        - subtly relatable
-        - natural
-        - conversational
-        - simple
-        - realistic
+The horoscope should never feel generic.
 
-        Focus on:
-        - everyday emotions
-        - realistic social situations
-        - mood changes
-        - conversations
-        - reactions between people
-        - moments of uncertainty
-        - reflection
-        - connection
-        - emotional atmosphere
+It should feel as though it was written specifically for today's unique astrological configuration.
 
-        The horoscope should NOT feel:
-        - mystical
-        - spiritual
-        - poetic
-        - therapeutic
-        - inspirational
-        - emotionally abstract
-        - vague
-        - dramatic
+==================================================
+GOAL
+==================================================
 
-        Avoid phrases like:
-        - "inner clarity"
-        - "authentic connection"
-        - "emotional energy"
-        - "the universe"
-        - "your soul"
-        - "deep transformation"
+Write a horoscope that is:
 
-        Describe:
-        - situations
-        - reactions
-        - emotional patterns
-        - conversation dynamics
-        - social behavior
+- natural
+- believable
+- emotionally intelligent
+- socially realistic
+- conversational
+- immersive
+- observational
+- easy to visualize
 
-        GOOD examples:
+The reader should think:
 
-        "Dnes můžete být citlivější na tón lidí kolem sebe. Některé věci si možná vezmete osobněji než obvykle. Večer přinese větší klid."
+"This genuinely sounds like the kind of day I could have."
 
-        "Krátký rozhovor vám může změnit náladu víc, než čekáte. Ne všechno potřebuje okamžité vysvětlení. Dopřejte si trochu odstup."
+Describe situations rather than abstract emotions.
 
-        "Můžete mít chuť stáhnout se víc do sebe. I malé věci dnes budou působit intenzivněji. Nespěchejte na odpovědi."
+Whenever possible, show emotions through actions, conversations, routines, choices and interactions.
 
-        BAD examples:
+==================================================
+ASTROLOGY DRIVES THE STORY
+==================================================
 
-        "Váš vnitřní citlivý proces způsobí zpožděné reakce."
-        "Lehká poznámka se propadne s jistou vahou."
-        "Hlubší ozvěna každodenních výměn."
+Everything in the horoscope must originate from the astrological interpretation.
 
-        ==================================================
-        ASTROLOGICAL STATE
-        ==================================================
+Do not invent situations that contradict today's astrology.
 
-        Moon phase:
-        ${analysis.moonPhase}
+The astrology should determine:
 
-        Moon placement:
-        ${analysis.moonPlacement}
+- today's atmosphere
+- emotional tendencies
+- communication style
+- relationships
+- work patterns
+- decision making
+- motivation
+- opportunities
+- challenges
 
-        Dominant planet:
-        ${analysis.dominantPlanet}
+Treat the astrological interpretation as the primary source of truth.
 
-        Dominant energy:
-        ${analysis.atmosphere.dominantEnergy}
+When multiple influences exist:
 
-        Planetary atmosphere:
-        ${analysis.atmosphere.planetaryAtmosphere}
+• identify recurring patterns
 
-        Emotional tone:
-        ${analysis.atmosphere.emotionalTone}
+• strengthen ideas supported by multiple influences
 
-        Today's atmosphere:
-        ${analysis.atmosphere.planetaryAtmosphere}
+• naturally blend conflicting influences
 
-        Main themes:
-        ${topThemes.join(", ")}
+• create one coherent story
 
-        Dominant aspects:
-        ${topAspects.join(", ")}
+Do not attempt to use every astrological detail equally.
 
-        Top themes:
-        ${topThemes.join(", ")}
+Favor consistency over completeness.
 
-        ==================================================
-        LIFE SCORES
-        ==================================================
+Use the following priority:
 
-        Love:
-        ${loveScore}/100
+1. Dominant aspects
 
-        Career:
-        ${careerScore}/100
+2. Dominant planet
 
-        Health:
-        ${healthScore}/100
+3. Overall atmosphere
 
-        Mood:
-        ${moodScore}/100
+4. Moon sign
 
-        ==================================================
-        USER
-        ==================================================
+5. Moon phase
 
-        Sun sign:
-        ${sunSign}
+6. Dominant themes
 
-        Moon sign:
-        ${moonSign}
+7. Energy profile
 
-        Relationship status:
-        ${relationshipStatus ?? "unknown"}
+8. Behavior tendencies
 
-        Priorities:
-        ${priorities?.join(", ") ?? "none"}
+9. Guidance
 
-        ==================================================
-        OUTPUT
-        ==================================================
+10. Opportunities
 
-        Return ONLY valid JSON:
+11. Challenges
 
-        {
-            "horoscope": "...",
-            "moonInsight": "...",
-            "focus": ["...", "..."],
-            "caution": ["...", "..."],
-            "do": "...",
-            "avoid": "...",
-            "love": number,
-            "career": number,
-            "health": number,
-            "mood": number
+12. Life scores
+
+==================================================
+EVERY DAY SHOULD FEEL DIFFERENT
+==================================================
+
+Imagine someone reading this horoscope every day.
+
+Each day should feel unique.
+
+Rotate naturally between:
+
+- work
+
+- productivity
+
+- creativity
+
+- money
+
+- family
+
+- romance
+
+- friendships
+
+- routines
+
+- health
+
+- travel
+
+- learning
+
+- hobbies
+
+- confidence
+
+- planning
+
+- organization
+
+- home life
+
+- unexpected events
+
+Different astrology should naturally create different kinds of days.
+
+A Venus day should not resemble a Saturn day.
+
+A Mars day should not resemble a Neptune day.
+
+A Full Moon should not resemble a Waning Crescent.
+
+The astrology should shape the narrative itself, not only the mood.
+
+==================================================
+WRITING STYLE
+==================================================
+
+Write like an excellent lifestyle columnist.
+
+The writing should feel:
+
+- modern
+
+- human
+
+- confident
+
+- grounded
+
+- emotionally believable
+
+- relatable
+
+Prefer:
+
+- realistic situations
+
+- everyday observations
+
+- practical consequences
+
+- believable dialogue
+
+- subtle emotional realism
+
+Show rather than explain.
+
+Instead of saying:
+
+"You feel uncertain."
+
+Describe why.
+
+Example:
+
+"You may realize that two different people expect different things from you."
+
+Instead of:
+
+"You become more confident."
+
+Describe the event that naturally creates confidence.
+
+Avoid:
+
+- mystical language
+
+- spiritual language
+
+- therapy language
+
+- motivational language
+
+- philosophy
+
+- literary metaphors
+
+- clichés
+
+- exaggerated drama
+
+==================================================
+ASTROLOGICAL STATE
+==================================================
+
+The following interpretation represents today's complete astrological picture.
+
+Treat it as the primary source of truth.
+
+Never mention astrology directly.
+
+Instead, translate these influences into believable everyday experiences.
+
+Do not describe every section independently.
+
+Combine them into one coherent narrative.
+
+Favor the strongest recurring influences.
+
+--------------------------------------------------
+MOON
+--------------------------------------------------
+
+Moon sign:
+${analysis.moon.sign}
+
+Moon phase:
+${analysis.moon.phase}
+
+Lunar influence:
+${analysis.moon.influence}
+
+--------------------------------------------------
+OVERALL ATMOSPHERE
+--------------------------------------------------
+
+Dominant energy:
+${analysis.atmosphere.dominantEnergy}
+
+Planetary atmosphere:
+${analysis.atmosphere.planetaryAtmosphere}
+
+Emotional tone:
+${analysis.atmosphere.emotionalTone}
+
+--------------------------------------------------
+DOMINANT PLANET
+--------------------------------------------------
+
+Planet:
+${dominantPlanet.profile.displayName}
+
+Meaning:
+${dominantPlanet.profile.description}
+
+Themes:
+${dominantPlanet.profile.themes.join(", ")}
+
+Keywords:
+${dominantPlanet.profile.keywords.join(", ")}
+
+Behavior
+
+Communication:
+${dominantPlanet.profile.expression.communication.join(", ")}
+
+Relationships:
+${dominantPlanet.profile.expression.relationships.join(", ")}
+
+Work:
+${dominantPlanet.profile.expression.work.join(", ")}
+
+Wellbeing:
+${dominantPlanet.profile.expression.wellbeing.join(", ")}
+
+Guidance
+
+Embrace:
+${dominantPlanet.profile.guidance.embrace.join(", ")}
+
+Avoid:
+${dominantPlanet.profile.guidance.avoid.join(", ")}
+
+Opportunities:
+${dominantPlanet.profile.opportunities.join(", ")}
+
+Challenges:
+${dominantPlanet.profile.challenges.join(", ")}
+
+--------------------------------------------------
+DOMINANT ASPECTS
+--------------------------------------------------
+
+${dominantAspects
+    .slice(0, 3)
+    .map(
+        (aspect, index) => `
+Aspect ${index + 1}
+
+${aspect.profile.displayName}
+
+Meaning:
+${aspect.profile.description}
+
+Themes:
+${aspect.profile.themes.join(", ")}
+
+Dynamics
+
+Communication:
+${aspect.profile.dynamics.communication.join(", ")}
+
+Relationships:
+${aspect.profile.dynamics.relationships.join(", ")}
+
+Work:
+${aspect.profile.dynamics.work.join(", ")}
+
+Wellbeing:
+${aspect.profile.dynamics.wellbeing.join(", ")}
+
+Guidance
+
+Embrace:
+${aspect.profile.guidance.embrace.join(", ")}
+
+Avoid:
+${aspect.profile.guidance.avoid.join(", ")}
+
+Opportunities:
+${aspect.profile.opportunities.join(", ")}
+
+Challenges:
+${aspect.profile.challenges.join(", ")}
+`
+    )
+    .join("\n")}
+
+--------------------------------------------------
+DOMINANT THEMES
+--------------------------------------------------
+
+${themes
+    .slice(0, 8)
+    .map((theme) => `${theme.theme}: ${Math.round(theme.score)}`)
+    .join("\n")}
+
+--------------------------------------------------
+ENERGY PROFILE
+--------------------------------------------------
+
+Activity:
+${energy.activity}
+
+Emotion:
+${energy.emotion}
+
+Intellect:
+${energy.intellect}
+
+Spirituality:
+${energy.spirituality}
+
+Interpret the strongest dimensions as today's dominant style of behavior.
+
+--------------------------------------------------
+BEHAVIOR TENDENCIES
+--------------------------------------------------
+
+These describe how today's astrology naturally expresses itself.
+
+Communication
+
+${behavior.communication.join(", ")}
+
+Relationships
+
+${behavior.relationships.join(", ")}
+
+Work
+
+${behavior.work.join(", ")}
+
+Wellbeing
+
+${behavior.wellbeing.join(", ")}
+
+--------------------------------------------------
+PRACTICAL GUIDANCE
+--------------------------------------------------
+
+Today's astrology especially supports:
+
+${guidance.embrace.join(", ")}
+
+Today's astrology advises caution with:
+
+${guidance.avoid.join(", ")}
+
+--------------------------------------------------
+LIKELY OPPORTUNITIES
+--------------------------------------------------
+
+${opportunities.join("\n")}
+
+--------------------------------------------------
+LIKELY CHALLENGES
+--------------------------------------------------
+
+${challenges.join("\n")}
+
+--------------------------------------------------
+EXAMPLE EVERYDAY SITUATIONS
+--------------------------------------------------
+
+These are examples of situations that naturally fit today's astrology.
+
+Use them as inspiration.
+
+Do not copy them literally.
+
+${analysis.observations.join("\n")}
+
+--------------------------------------------------
+LIFE AREA SCORES
+--------------------------------------------------
+
+These scores describe where today's astrology is strongest.
+
+Higher scores should naturally produce smoother experiences.
+
+Lower scores should create believable friction.
+
+Love:
+${loveScore}/100
+
+Career:
+${careerScore}/100
+
+Health:
+${healthScore}/100
+
+Mood:
+${moodScore}/100
+
+==================================================
+USER CONTEXT
+==================================================
+
+Sun sign:
+
+${sunSign}
+
+Moon sign:
+
+${moonSign}
+
+Relationship status:
+
+${relationshipStatus ?? "unknown"}
+
+Priorities:
+
+${priorities?.join(", ") ?? "none"}
+
+Do not mention the user's Sun sign, Moon sign or relationship status directly.
+
+If the user's priorities naturally align with today's astrology, gently incorporate them.
+
+Never force them into the narrative.
+
+==================================================
+OUTPUT
+==================================================
+
+Return ONLY valid JSON.
+
+{
+    "overview": {
+        "title": "string",
+        "description": "string"
+    },
+    "moon": {
+        "phase": "string",
+        "insight": "string",
+        "reason": "string"
+    },
+    "insights": {
+        "love": {
+            "score": number,
+            "insight": "string",
+            "reason": "string"
+        },
+        "career": {
+            "score": number,
+            "insight": "string",
+            "reason": "string"
+        },
+        "health": {
+            "score": number,
+            "insight": "string",
+            "reason": "string"
+        },
+        "mood": {
+            "score": number,
+            "insight": "string",
+            "reason": "string"
         }
+    },
+    "opportunity": {
+        "description": "string",
+        "examples": [
+            "string",
+            "string",
+            "string",
+            "string"
+        ]
+    },
+    "watchOut": {
+        "description": "string",
+        "examples": [
+            "string",
+            "string",
+            "string",
+            "string"
+        ]
+    },
+    "deepInsight": "string"
+}
 
-        ==================================================
-        RULES
-        ==================================================
+Field requirements:
 
-        HOROSCOPE:
-        - 6 to 8 sentences
-        - split the horoscope into 2–3 short paragraphs
-        - each paragraph should contain 2–4 sentences
-        - use line breaks between paragraphs
-        - avoid one large block of text
-        - the structure should feel easy to scan and pleasant to read on mobile
-        - vary sentence length
-        - some sentences can be longer and more descriptive
-        - the horoscope should feel immersive and emotionally realistic
-        - describe small believable moments
-        - include emotional contrast
-        - observations should dominate, but subtle guidance is welcome
-        - avoid repeating the same emotional idea in multiple sentences
-        - avoid emotional abstraction
-        - avoid emotional philosophy
-        - avoid vague emotional language
-        - focus on realistic emotional/social situations
-        - avoid generic self-help wording
-        - avoid sounding like therapy advice
-        - avoid abstract emotional concepts
-        - avoid literary wording
-        - avoid abstract metaphors
-        - avoid repeating the same emotional idea in multiple sentences
-        - avoid excessive positivity
-        - avoid motivational tone
-        - subtle emotional realism is better than inspiration
-        - use simple natural ${language} language
+- overview.title:
+  Short, memorable headline (max 30-40 characters).
 
-        The horoscope should feel naturally progressive:
-        Paragraph 1:
-        - general mood of the day
-        - emotional atmosphere
+- overview.description:
+  One concise summary of today's overall energy (max 180 characters).
 
-        Paragraph 2:
-        - one believable emotional, social or practical situation
-        - subtle contrast, tension or realization
+- moon.phase:
+  Current Moon phase (e.g. "Waxing Gibbous").
 
-        Paragraph 3:
-        - perspective, calm, release, opportunity or useful observation
+- moon.insight:
+  Explain how today's Moon placement may be experienced (max 150 characters).
 
-        MOONINSIGHT:
-        Generate a short lunar insight:
-        - 1 or 2 sentences
-        - maximum 25 words
-        - describe likely emotional tendencies
-        - practical and relatable
-        - avoid mystical language
-        - avoid spiritual language
-        - avoid predictions
+- moon.reason:
+  Explain WHY today's Moon sign and phase create this influence (max 150 characters).
 
-        FOCUS:
-        - exactly 4 relatable areas of attention
-        - each item should contain 1 or 2 words
-        - lifestyle-oriented and human
-        - avoid abstract psychology
-        - examples:
-        close friends
-        texting
-        routines
-        flirting
-        patience
-        finances
-        family time
-        sleep
+- insights.*.score:
+  Integer between 0 and 100.
 
-        CAUTION:
-        - exactly 2 realistic emotional or social pitfalls
-        - should feel natural and specific
-        - avoid therapy language
-        - examples:
-        mixed signals, overreacting, unnecessary tension, impulse spending, doomscrolling
+- insights.*.insight:
+  A practical, specific insight for that life area (max 150 characters).
 
-        DO:
-        - one short recommendation or opportunity for today
-        - write a complete sentence
-        - maximum 10 words
-        - practical, relatable and realistic
-        - examples:
-        Reach out to someone first.
-        Take a longer evening walk.
-        Finish a small unfinished task.
-        Make time for a meaningful conversation.
-        Try something slightly different today.
+- insights.*.reason:
+  Explain the astrological reason behind the insight (max 150 characters).
 
-        AVOID:
-        - one short recommendation about what not to do today
-        - write a complete sentence
-        - maximum 10 words
-        - realistic and specific
-        - examples:
-        Don't respond in frustration.
-        Avoid rushing important decisions.
-        Don't overthink every message.
-        Avoid unnecessary online arguments.
-        Don't ignore signs of fatigue.
+- opportunity.description:
+  One practical opportunity, activity or recommendation for today (max 150 characters).
 
-        IMPORTANT:
-        - not every day should feel optimistic
-        - difficult emotional atmospheres are valid
-        - reflective days are valid
-        - uncertainty is valid
-        - emotional complexity is good
-        - vary sentence length naturally
-        - combine shorter and longer sentences
-        - some sentences can contain two connected thoughts
-        - avoid overly fragmented writing
-        - write in flowing natural paragraphs
-        - avoid sentence-per-thought structure
-        - use simple natural ${language} language
-        - avoid literary wording
-        - avoid abstract metaphors
-        
+- opportunity.examples:
+  Array of exactly 4 short words or phrases representing today's recommended activities or themes.
+  Examples:
+  ["Networking", "Exercise", "Creative work", "Reading"]
 
-        The scores should feel aligned with the astrology.
+- watchOut.description:
+  One practical warning about what to avoid today (max 150 characters).
 
-        Respond in following language:
-        ${language}
-        `;
+- watchOut.examples:
+  Array of exactly 4 short words or phrases representing things to avoid today.
+  Examples:
+  ["Arguments", "Overspending", "Procrastination", "Impulsive decisions"]
+
+- deepInsight:
+  A detailed horoscope with multiple paragraphs explaining today's astrological influences, practical implications and guidance.
+
+Do not return markdown.
+
+Do not wrap the JSON inside code fences.
+
+Do not explain anything.
+
+Return only the JSON object.
+
+==================================================
+HOROSCOPE
+==================================================
+
+Write a horoscope consisting of 6–8 sentences.
+
+Split it into 2–3 short paragraphs.
+
+Separate paragraphs with one blank line.
+
+The horoscope should read like a believable story about today's experiences.
+
+It should feel personal without pretending to know facts about the user's life.
+
+Describe situations that many people genuinely experience.
+
+The situations should become unique because of today's astrology.
+
+--------------------------------------------------
+BUILD THE DAY
+--------------------------------------------------
+
+Beginning
+
+Introduce today's atmosphere.
+
+Allow the reader to immediately recognize the type of day.
+
+Middle
+
+Describe one or two realistic situations.
+
+These situations should naturally emerge from today's dominant themes, behavior tendencies, opportunities and challenges.
+
+Ending
+
+Finish with a believable outcome, practical realization or quiet opportunity.
+
+Avoid dramatic endings.
+
+Avoid artificial optimism.
+
+--------------------------------------------------
+SHOW, DON'T EXPLAIN
+--------------------------------------------------
+
+Always describe situations before emotions.
+
+Instead of:
+
+"You feel uncertain."
+
+Describe the situation that creates uncertainty.
+
+Instead of:
+
+"You become more confident."
+
+Describe the event that naturally builds confidence.
+
+Instead of:
+
+"You feel stressed."
+
+Describe the responsibilities, conversations or events that realistically create pressure.
+
+Whenever possible:
+
+Actions → create emotions.
+
+Not:
+
+Emotions → create actions.
+
+==================================================
+REALISTIC EVERYDAY MOMENTS
+==================================================
+
+Prefer situations such as:
+
+• finishing postponed work
+
+• reorganizing plans
+
+• receiving unexpected appreciation
+
+• waiting for a message
+
+• clearing up a misunderstanding
+
+• making practical decisions
+
+• helping someone
+
+• unexpected invitations
+
+• solving everyday problems
+
+• improving routines
+
+• family responsibilities
+
+• financial choices
+
+• learning something useful
+
+• rediscovering an old idea
+
+The situations should feel ordinary but memorable.
+
+==================================================
+NARRATIVE DIVERSITY
+==================================================
+
+Avoid repeatedly creating horoscopes about:
+
+• overthinking
+
+• hidden meanings
+
+• reading between the lines
+
+• emotional sensitivity
+
+• misunderstanding conversations
+
+• analyzing relationships
+
+• emotional processing
+
+These themes should appear only when today's astrology strongly supports them.
+
+Different astrology should naturally create different kinds of days.
+
+Examples:
+
+• productive
+
+• practical
+
+• social
+
+• romantic
+
+• adventurous
+
+• energetic
+
+• reflective
+
+• disciplined
+
+• playful
+
+• organized
+
+• spontaneous
+
+The astrology should determine which kind of day today's horoscope becomes.
+
+==================================================
+WRITING QUALITY
+==================================================
+
+Write like an experienced journalist or lifestyle columnist.
+
+Not like:
+
+• an astrologer
+
+• a therapist
+
+• a philosopher
+
+• a motivational speaker
+
+Avoid:
+
+• clichés
+
+• vague encouragement
+
+• generic self-help
+
+• spiritual language
+
+• mystical wording
+
+• therapy terminology
+
+• literary metaphors
+
+• exaggerated emotions
+
+Vary sentence openings.
+
+Vary sentence lengths.
+
+Some sentences may be short.
+
+Some may be more descriptive.
+
+Avoid repeatedly beginning sentences with:
+
+"You may..."
+
+"You might..."
+
+"Today..."
+
+"It may..."
+
+The writing should feel naturally human.
+
+==================================================
+MOON INSIGHT
+==================================================
+
+Write one short insight inspired by today's Moon sign and Moon phase.
+
+Length:
+
+1–2 sentences.
+
+Maximum 25 words.
+
+Purpose:
+
+Highlight one subtle emotional tendency that could naturally become noticeable today.
+
+The insight should:
+
+• feel practical
+
+• feel relatable
+
+• sound contemporary
+
+• complement the horoscope
+
+Do not:
+
+• predict specific events
+
+• mention astrology
+
+• mention planets
+
+• mention zodiac signs
+
+• use mystical language
+
+==================================================
+OPPORTUNITY
+==================================================
+
+Write one practical opportunity or recommendation for today.
+
+Base it on:
+
+• today's opportunities
+• today's guidance
+• dominant themes
+
+Maximum 150 characters.
+
+Describe one realistic activity or direction that is especially supported today.
+
+Generate exactly four activities.
+
+Each activity must be 1–3 words.
+
+Choose practical activities, situations or themes.
+
+Examples:
+
+Networking
+Creative work
+Exercise
+Financial planning
+Learning
+Nature
+Deep conversations
+Family time
+
+Do not repeat the same idea from the description.
+
+==================================================
+WATCH OUT
+==================================================
+
+Write one practical warning for today.
+
+Base it on:
+
+• today's challenges
+• today's guidance
+• dominant aspects
+• lower life scores
+
+Maximum 150 characters.
+
+Describe one realistic behavior or situation worth avoiding today.
+
+Generate exactly four avoid items.
+
+Each item must be 1–3 words.
+
+Examples:
+
+Arguments
+Overspending
+Impulsive decisions
+Procrastination
+Distractions
+Overthinking
+Conflict
+Risk-taking
+
+Do not repeat the same idea from the description.
+
+==================================================
+SCORES
+==================================================
+
+Return exactly the provided scores.
+
+Do not invent new values.
+
+Love:
+${loveScore}
+
+Career:
+${careerScore}
+
+Health:
+${healthScore}
+
+Mood:
+${moodScore}
+
+The horoscope should naturally reflect these values.
+
+Higher scores should create more opportunities.
+
+Lower scores should create more realistic obstacles.
+
+Do not make every area equally positive.
+
+==================================================
+CONSISTENCY
+==================================================
+
+Every generated field should support the same overall narrative.
+
+The horoscope, Moon Insight, Focus, Caution, Do and Avoid should all describe the same kind of day.
+
+Avoid contradictions.
+
+Avoid introducing ideas unsupported by today's astrological interpretation.
+
+If one influence is clearly dominant, allow it to shape every generated field.
+
+Focus areas should naturally emerge from the horoscope.
+
+Cautions should naturally emerge from the challenges.
+
+The "Do" recommendation should reflect today's opportunities.
+
+The "Avoid" recommendation should reflect today's challenges.
+
+==================================================
+FINAL QUALITY CHECK
+==================================================
+
+Before returning the JSON, silently verify that:
+
+• the horoscope clearly reflects today's astrological interpretation
+
+• the dominant planet and dominant aspects noticeably influence the narrative
+
+• the Moon influences the emotional atmosphere
+
+• behavior tendencies shape how people interact
+
+• opportunities appear naturally
+
+• challenges create believable friction
+
+• life scores influence which areas receive attention
+
+• emotions are shown through situations instead of abstract statements
+
+• at least one concrete everyday situation appears
+
+• the horoscope could not reasonably fit a different astrological day
+
+• the writing feels natural and contemporary
+
+• no sentence sounds like generic self-help
+
+• no sentence sounds mystical or spiritual
+
+• no astrology is mentioned directly
+
+• the ending feels calm, believable and satisfying
+
+• activity and avoid items must be concise (1–3 words each).
+
+• use practical everyday activities, situations or themes.
+
+• do not repeat the same recommendation in both the description and the list.
+
+• prefer specific and actionable suggestions over generic advice.
+
+If the horoscope feels generic, rewrite it.
+
+If several different astrological influences repeat the same idea, strengthen that idea.
+
+If different influences conflict, create a believable balance instead of ignoring either one.
+
+The reader should immediately feel that today's horoscope is unique.
+
+Respond only in:
+${language} language.
+`;
 }
 
 /* ============================================================
    GENERATE DAILY INSIGHT
 ============================================================ */
+
+export interface DailyInsight {
+    overview: {
+        title: string;
+        description: string;
+    };
+    moon: {
+        phase: string;
+        insight: string;
+        reason: string;
+    };
+    insights: {
+        love: {
+            score: number;
+            insight: string;
+            reason: string;
+        };
+        career: {
+            score: number;
+            insight: string;
+            reason: string;
+        };
+        health: {
+            score: number;
+            insight: string;
+            reason: string;
+        };
+        mood: {
+            score: number;
+            insight: string;
+            reason: string;
+        };
+    };
+    opportunity: {
+        description: string;
+        examples: string[];
+    };
+    watchOut: {
+        description: string;
+        examples: string[];
+    };
+    deepInsight: string;
+    debug?: any;
+}
 
 export async function generateDailyInsight(input: {
     transits: DailyTransits;
@@ -1219,7 +1699,12 @@ export async function generateDailyInsight(input: {
     relationshipStatus?: string;
     priorities?: string[];
     goals?: string[];
-}) {
+}): Promise<
+    DailyInsight & {
+        rawResponse: string;
+        rawInput: string;
+    }
+> {
     const analysis = analyzeTransits(input.transits);
 
     const prompt = buildPrompt({
@@ -1236,53 +1721,417 @@ export async function generateDailyInsight(input: {
         contents: prompt,
     });
 
+    // console.log("======== PROMPT =========");
+    // console.log(JSON.stringify(prompt));
+    // console.log("======== PROMPT =========");
+    // console.log("======== RESPONSE =========");
+    // console.log(JSON.stringify(response.text));
+    // console.log("======== RESPONSE =========");
+
     const text = response.text ?? "";
 
-    const result = parseLLMJson<{
-        horoscope: string;
-        moonInsight: string;
-
-        focus: string[];
-        caution: string[];
-
-        do: string;
-        avoid: string;
-
-        love: number;
-        career: number;
-        health: number;
-        mood: number;
-    }>(text);
+    const result = parseLLMJson<DailyInsight>(text);
 
     if (!result) {
         throw new Error("Failed to parse horoscope response");
     }
 
     return {
-        horoscope: result.horoscope,
-        moonInsight: result.moonInsight,
-        focus: result.focus,
-        caution: result.caution,
-        do: result.do,
-        avoid: result.avoid,
-        scores: {
-            love: result.love,
-            career: result.career,
-            health: result.health,
-            mood: result.mood,
+        overview: result.overview,
+        moon: result.moon,
+        insights: {
+            love: {
+                score: result.insights.love.score,
+                insight: result.insights.love.insight,
+                reason: result.insights.love.reason,
+            },
+            career: {
+                score: result.insights.career.score,
+                insight: result.insights.career.insight,
+                reason: result.insights.career.reason,
+            },
+            health: {
+                score: result.insights.health.score,
+                insight: result.insights.health.insight,
+                reason: result.insights.health.reason,
+            },
+            mood: {
+                score: result.insights.mood.score,
+                insight: result.insights.mood.insight,
+                reason: result.insights.mood.reason,
+            },
         },
+        opportunity: result.opportunity,
+        watchOut: result.watchOut,
+        deepInsight: result.deepInsight,
         debug: {
-            dominantPlanet: analysis.dominantPlanet,
-            dominantEnergy: analysis.atmosphere.dominantEnergy,
-            planetaryAtmosphere: analysis.atmosphere.planetaryAtmosphere,
-            emotionalTone: analysis.atmosphere.emotionalTone,
-            shadowRatio: analysis.atmosphere.shadowRatio,
-            topThemes: analysis.topThemes,
-            dominantAspects: analysis.dominantAspects,
-            energy: analysis.energy,
-            polarity: analysis.polarity,
-            areaScores: analysis.areaScores,
-            planetDominance: analysis.planetDominance,
+            context: analysis.context,
+            atmosphere: analysis.atmosphere,
+            moon: analysis.moon,
+            observations: analysis.observations,
         },
+        rawResponse: getLLMJson(text),
+        rawInput: prompt,
+    };
+}
+
+export interface AstrologicalProfile {
+    /**
+     * Interní identifikátor.
+     */
+    id: string;
+
+    /**
+     * Název pro AI i UI.
+     */
+    displayName: string;
+    /**
+     * Krátký astrologický význam.
+     */
+    description: string;
+    /**
+     * Hlavní astrologická témata.
+     */
+    themes: Theme[];
+    /**
+     * Oblasti života, které objekt nejvíce ovlivňuje.
+     */
+    lifeAreas: Partial<Record<LifeArea, number>>;
+    /**
+     * Jakou energii přináší.
+     */
+    energy: {
+        activity: number;
+        emotion: number;
+        intellect: number;
+        spirituality: number;
+    };
+    /**
+     * Typický způsob projevu.
+     */
+    expression: {
+        communication: string[];
+        relationships: string[];
+        work: string[];
+        wellbeing: string[];
+    };
+    /**
+     * Co energie podporuje.
+     */
+    opportunities: string[];
+    /**
+     * Na co si dát pozor.
+     */
+    challenges: string[];
+    /**
+     * Praktická doporučení.
+     */
+    guidance: {
+        embrace: string[];
+        avoid: string[];
+    };
+    /**
+     * Jednoslovné pojmy vhodné pro AI.
+     */
+    keywords: string[];
+}
+
+export interface SignProfile {
+    id: ZodiacSign;
+
+    displayName: string;
+
+    description: string;
+
+    themes: Theme[];
+
+    modifiers: {
+        activity: number;
+
+        emotion: number;
+
+        intellect: number;
+
+        spirituality: number;
+    };
+
+    expression: {
+        communication: string[];
+
+        relationships: string[];
+
+        work: string[];
+
+        wellbeing: string[];
+    };
+
+    strengths: string[];
+
+    challenges: string[];
+
+    keywords: string[];
+}
+
+export interface AspectProfile {
+    id: AspectType;
+
+    displayName: string;
+
+    description: string;
+
+    interaction: {
+        harmony: number;
+        intensity: number;
+        friction: number;
+        growth: number;
+    };
+
+    themes: Theme[];
+
+    dynamics: {
+        communication: string[];
+        relationships: string[];
+        work: string[];
+        wellbeing: string[];
+    };
+
+    opportunities: string[];
+
+    challenges: string[];
+
+    guidance: {
+        embrace: string[];
+        avoid: string[];
+    };
+
+    keywords: string[];
+}
+
+export type ProfileType = "planet" | "sign" | "aspect";
+
+export interface PlanetInfluence {
+    type: "planet";
+    id: string;
+    score: number;
+    profile: AstrologicalProfile;
+    source?: TransitPlanet;
+}
+
+export interface SignInfluence {
+    type: "sign";
+    id: string;
+    score: number;
+    profile: SignProfile;
+    source?: TransitPlanet;
+}
+
+export interface AspectInfluence {
+    type: "aspect";
+    id: string;
+    score: number;
+    profile: AspectProfile;
+    source?: TransitAspect;
+}
+
+export type ProfileInfluence = PlanetInfluence | SignInfluence | AspectInfluence;
+
+export function isPlanetInfluence(influence: ProfileInfluence): influence is ProfileInfluence & {
+    profile: AstrologicalProfile;
+} {
+    return influence.type === "planet";
+}
+
+export function isSignInfluence(influence: ProfileInfluence): influence is ProfileInfluence & {
+    profile: SignProfile;
+} {
+    return influence.type === "sign";
+}
+
+export function isAspectInfluence(influence: ProfileInfluence): influence is ProfileInfluence & {
+    profile: AspectProfile;
+} {
+    return influence.type === "aspect";
+}
+
+export const PLANET_WEIGHTS: Record<Planet, number> = {
+    sun: 1.3,
+    moon: 1.25,
+    mercury: 1.0,
+    venus: 1.05,
+    mars: 1.1,
+    jupiter: 0.95,
+    saturn: 0.95,
+    uranus: 0.75,
+    neptune: 0.75,
+    pluto: 0.75,
+};
+
+export function collectInfluences(transits: DailyTransits): ProfileInfluence[] {
+    const influences: ProfileInfluence[] = [];
+
+    // planets
+
+    for (const planet of Object.keys(transits.planets) as Planet[]) {
+        influences.push({
+            type: "planet",
+            id: planet,
+            score: PLANET_WEIGHTS[planet],
+            profile: PLANET_PROFILES[planet],
+            source: transits.planets[planet],
+        });
+    }
+
+    // signs
+
+    for (const [planetName, planet] of Object.entries(transits.planets) as [Planet, TransitPlanet][]) {
+        influences.push({
+            type: "sign",
+            id: planet.sign,
+            score: PLANET_WEIGHTS[planetName] * 0.8,
+            profile: SIGN_PROFILES[planet.sign],
+            source: planet,
+        });
+    }
+
+    // aspects
+
+    for (const aspect of transits.aspects) {
+        const [planet1, planet2] = aspect.planets;
+
+        const planetWeight = (PLANET_WEIGHTS[planet1] + PLANET_WEIGHTS[planet2]) / 2;
+
+        influences.push({
+            type: "aspect",
+            id: aspect.type,
+            score: ASPECT_WEIGHTS[aspect.type] * getOrbMultiplier(aspect.orb) * planetWeight,
+            profile: ASPECT_PROFILES[aspect.type],
+            source: aspect,
+        });
+    }
+
+    return influences;
+}
+
+export interface InterpretationContext {
+    themes: ThemeScore[];
+    energy: EnergyProfile;
+    lifeAreas: AreaScore[];
+    dominantPlanets: DominantPlanet[];
+    dominantAspects: DominantAspect[];
+    behavior: BehaviorContext;
+    guidance: GuidanceContext;
+    opportunities: string[];
+    challenges: string[];
+}
+
+export interface GuidanceContext {
+    embrace: string[];
+    avoid: string[];
+}
+export interface BehaviorContext {
+    communication: string[];
+    relationships: string[];
+    work: string[];
+    wellbeing: string[];
+}
+
+export function aggregateBehavior(influences: ProfileInfluence[]): BehaviorContext {
+    const communication = new Set<string>();
+    const relationships = new Set<string>();
+    const work = new Set<string>();
+    const wellbeing = new Set<string>();
+
+    for (const influence of influences) {
+        switch (influence.type) {
+            case "planet":
+            case "sign":
+                influence.profile.expression.communication.forEach((x) => communication.add(x));
+                influence.profile.expression.relationships.forEach((x) => relationships.add(x));
+                influence.profile.expression.work.forEach((x) => work.add(x));
+                influence.profile.expression.wellbeing.forEach((x) => wellbeing.add(x));
+
+                break;
+
+            case "aspect":
+                influence.profile.dynamics.communication.forEach((x) => communication.add(x));
+                influence.profile.dynamics.relationships.forEach((x) => relationships.add(x));
+                influence.profile.dynamics.work.forEach((x) => work.add(x));
+                influence.profile.dynamics.wellbeing.forEach((x) => wellbeing.add(x));
+
+                break;
+        }
+    }
+
+    return {
+        communication: [...communication],
+        relationships: [...relationships],
+        work: [...work],
+        wellbeing: [...wellbeing],
+    };
+}
+
+export function buildInterpretationContext(influences: ProfileInfluence[]): InterpretationContext {
+    return {
+        themes: scoreThemes(influences),
+        energy: aggregateEnergy(influences),
+        lifeAreas: aggregateLifeAreas(influences),
+        dominantPlanets: getDominantPlanets(influences),
+        dominantAspects: getDominantAspects(influences),
+        behavior: aggregateBehavior(influences),
+        guidance: aggregateGuidance(influences),
+        opportunities: aggregateOpportunities(influences),
+        challenges: aggregateChallenges(influences),
+    };
+}
+
+export function aggregateChallenges(influences: ProfileInfluence[]): string[] {
+    const challenges = new Set<string>();
+
+    for (const influence of influences) {
+        influence.profile.challenges.forEach((x) => challenges.add(x));
+    }
+
+    return [...challenges];
+}
+
+export function aggregateOpportunities(influences: ProfileInfluence[]): string[] {
+    const opportunities = new Set<string>();
+
+    for (const influence of influences) {
+        switch (influence.type) {
+            case "planet":
+                influence.profile.opportunities.forEach((x) => opportunities.add(x));
+                break;
+
+            case "aspect":
+                influence.profile.opportunities.forEach((x) => opportunities.add(x));
+                break;
+        }
+    }
+
+    return [...opportunities];
+}
+
+export function aggregateGuidance(influences: ProfileInfluence[]): GuidanceContext {
+    const embrace = new Set<string>();
+    const avoid = new Set<string>();
+
+    for (const influence of influences) {
+        switch (influence.type) {
+            case "planet":
+                influence.profile.guidance.embrace.forEach((x) => embrace.add(x));
+                influence.profile.guidance.avoid.forEach((x) => avoid.add(x));
+                break;
+
+            case "aspect":
+                influence.profile.guidance.embrace.forEach((x) => embrace.add(x));
+                influence.profile.guidance.avoid.forEach((x) => avoid.add(x));
+                break;
+        }
+    }
+
+    return {
+        embrace: [...embrace],
+        avoid: [...avoid],
     };
 }

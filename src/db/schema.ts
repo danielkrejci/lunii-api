@@ -13,6 +13,105 @@ import {
     uniqueIndex,
 } from "drizzle-orm/pg-core";
 
+import { DailyOverviewResponse } from "../modules/compatibilityPeople/ai";
+import { CompatibilityResult, DailyCompatibilityResult, NatalChart } from "../modules/compatibilityPeople/types";
+import { DailyInsight } from "../modules/insights";
+import { Gender, Relationship, TransitAspects, TransitPlanets, ZodiacSign } from "../utils/natalUtils";
+
+export const compatibilityPeopleScores = pgTable(
+    "compatibility_people_scores",
+    {
+        date: date("date", { mode: "string" }).notNull(),
+        personId: text("person_id")
+            .notNull()
+            .references(() => compatibilityPeople.id, { onDelete: "cascade" }),
+        score: numeric("score").$type<number>().notNull(),
+        compatibility: jsonb("compatibility").$type<DailyCompatibilityResult>().notNull(),
+        overview: text("overview"),
+        positiveOverview: jsonb("positive_overview").$type<DailyOverviewResponse["positiveOverview"]>(),
+        negativeOverview: jsonb("negative_overview").$type<DailyOverviewResponse["negativeOverview"]>(),
+        insights: jsonb("insights").$type<DailyOverviewResponse["insights"]>(),
+        practicalAdvice: text("practical_advice"),
+        rawInput: text("raw_input"),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        updatedAt: timestamp("updated_at")
+            .defaultNow()
+            .$onUpdate(() => new Date())
+            .notNull(),
+    },
+    (table) => [uniqueIndex("compatibility_people_scores_person_date_idx").on(table.personId, table.date)]
+);
+
+export const compatibilityPeople = pgTable(
+    "compatibility_people",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+        name: text("name").notNull(),
+        gender: text("gender").$type<Gender>().notNull(),
+        relationship: text("relationship").$type<Relationship>().notNull(),
+        birthDate: date("birth_date", { mode: "string" }).notNull(),
+        birthTime: time("birth_time"),
+        birthPlace: text("birth_place"),
+        birthPlaceLat: doublePrecision("birth_place_lat"),
+        birthPlaceLng: doublePrecision("birth_place_lng"),
+        timezone: text("timezone"),
+        image: text("image"),
+        sunSign: text("sun_sign").$type<ZodiacSign>().notNull(),
+        moonSign: text("moon_sign").$type<ZodiacSign>(),
+        risingSign: text("rising_sign").$type<ZodiacSign>(),
+        birthChart: jsonb("birth_chart").$type<NatalChart>().notNull(),
+        baseScore: numeric("base_score").$type<number>().notNull(),
+        baseCompatibility: jsonb("base_compatibility").$type<CompatibilityResult>().notNull(),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        updatedAt: timestamp("updated_at")
+            .defaultNow()
+            .$onUpdate(() => new Date())
+            .notNull(),
+    },
+    (table) => [index("compatibility_people_user_id_idx").on(table.userId)]
+);
+
+// overview: {
+//             title: string;
+//             description: string;
+//         };
+//         moon: {
+//             phase: string;
+//             insight: string;
+//             reason: string;
+//         };
+//         insights: {
+//             love: {
+//                 score: number;
+//                 insight: string;
+//                 reason: string;
+//             };
+//             career: {
+//                 score: number;
+//                 insight: string;
+//                 reason: string;
+//             };
+//             health: {
+//                 score: number;
+//                 insight: string;
+//                 reason: string;
+//             };
+//             mood: {
+//                 score: number;
+//                 insight: string;
+//                 reason: string;
+//             };
+//         };
+//         opportunity: string;
+//         watchOut: string;
+//         deepInsight: string;
+
 export const dailyInsights = pgTable(
     "daily_insights",
     {
@@ -20,20 +119,25 @@ export const dailyInsights = pgTable(
             .notNull()
             .references(() => user.id, { onDelete: "cascade" }),
         date: date("date", { mode: "string" }).notNull(),
-        focus: text("focus").array().notNull(),
-        caution: text("caution").array().notNull(),
-        do: text("do").notNull(),
-        avoid: text("avoid").notNull(),
-        horoscope: text("horoscope").notNull(),
-        moonInsight: text("moonInsight").notNull().default(""),
-        scoreLove: numeric("score_love").$type<number>().notNull().default(0),
-        scoreCareer: numeric("score_career").$type<number>().notNull().default(0),
-        scoreHealth: numeric("score_health").$type<number>().notNull().default(0),
-        scoreMood: numeric("score_mood").$type<number>().notNull().default(0),
+        overview: jsonb("overview").$type<DailyInsight["overview"]>().notNull(),
+        moon: jsonb("moon").$type<DailyInsight["moon"]>().notNull(),
+        loveScore: numeric("love_score").$type<number>().notNull(),
+        loveInsight: jsonb("love_insight").$type<DailyInsight["insights"]["love"]>().notNull(),
+        careerScore: numeric("career_score").$type<number>().notNull(),
+        careerInsight: jsonb("career_insight").$type<DailyInsight["insights"]["career"]>().notNull(),
+        healthScore: numeric("health_score").$type<number>().notNull(),
+        healthInsight: jsonb("health_insight").$type<DailyInsight["insights"]["health"]>().notNull(),
+        moodScore: numeric("mood_score").$type<number>().notNull(),
+        moodInsight: jsonb("mood_insight").$type<DailyInsight["insights"]["mood"]>().notNull(),
+        opportunity: jsonb("opportunity").$type<DailyInsight["opportunity"]>().notNull(),
+        watchOut: jsonb("watch_out").$type<DailyInsight["watchOut"]>().notNull(),
+        deepInsight: text("deep_insight").notNull(),
+        rawResponse: text("raw_response").notNull(),
+        rawInput: text("raw_input").notNull().default(""),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
             .defaultNow()
-            .$onUpdate(() => /* @__PURE__ */ new Date())
+            .$onUpdate(() => new Date())
             .notNull(),
     },
     (table) => [uniqueIndex("daily_insights_user_id_date_idx").on(table.userId, table.date)]
@@ -41,8 +145,8 @@ export const dailyInsights = pgTable(
 
 export const transit = pgTable("transit", {
     date: date("date", { mode: "string" }).primaryKey(),
-    planets: jsonb("planets").notNull(),
-    aspects: jsonb("aspects").notNull(),
+    planets: jsonb("planets").$type<TransitPlanets>().notNull(),
+    aspects: jsonb("aspects").$type<TransitAspects>().notNull(),
 });
 
 export const profile = pgTable(
@@ -63,10 +167,10 @@ export const profile = pgTable(
         birthPlace: text("birth_place").notNull(),
         birthPlaceLat: doublePrecision("birth_place_lat").notNull(),
         birthPlaceLng: doublePrecision("birth_place_lng").notNull(),
-        gender: text("gender").notNull(),
-        sunSign: text("sun_sign").notNull(),
-        moonSign: text("moon_sign").notNull(),
-        risingSign: text("rising_sign").notNull(),
+        gender: text("gender").$type<Gender>().notNull(),
+        sunSign: text("sun_sign").$type<ZodiacSign>().notNull(),
+        moonSign: text("moon_sign").$type<ZodiacSign>().notNull(),
+        risingSign: text("rising_sign").$type<ZodiacSign>().notNull(),
         relationshipStatus: text("relationship_status").notNull(),
         careerStage: text("career_stage").notNull(),
         decisionStyle: text("decision_style").notNull(),
@@ -75,14 +179,16 @@ export const profile = pgTable(
         contentPreference: text("content_preference").notNull(),
         beliefLevel: text("belief_level").notNull(),
         personalityProfile: text("personality_profile").notNull(),
+        personalityProfileInput: text("personality_profile_input").notNull().default(""),
         timezone: text("timezone").notNull(),
         notificationToken: text("notification_token"),
         country: text("country").notNull(),
         language: text("language").notNull(),
+        birthChart: jsonb("birth_chart").$type<NatalChart>().notNull(),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
             .defaultNow()
-            .$onUpdate(() => /* @__PURE__ */ new Date())
+            .$onUpdate(() => new Date())
             .notNull(),
     },
     (table) => [
@@ -100,7 +206,7 @@ export const user = pgTable("user", {
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at")
         .defaultNow()
-        .$onUpdate(() => /* @__PURE__ */ new Date())
+        .$onUpdate(() => new Date())
         .notNull(),
     isAnonymous: boolean("is_anonymous").default(false),
 });
@@ -113,7 +219,7 @@ export const session = pgTable(
         token: text("token").notNull().unique(),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
-            .$onUpdate(() => /* @__PURE__ */ new Date())
+            .$onUpdate(() => new Date())
             .notNull(),
         ipAddress: text("ip_address"),
         userAgent: text("user_agent"),
@@ -142,7 +248,7 @@ export const account = pgTable(
         password: text("password"),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
-            .$onUpdate(() => /* @__PURE__ */ new Date())
+            .$onUpdate(() => new Date())
             .notNull(),
     },
     (table) => [
@@ -161,7 +267,7 @@ export const verification = pgTable(
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
             .defaultNow()
-            .$onUpdate(() => /* @__PURE__ */ new Date())
+            .$onUpdate(() => new Date())
             .notNull(),
     },
     (table) => [index("verification_identifier_idx").on(table.identifier)]

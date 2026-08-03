@@ -5,7 +5,15 @@ import { AsyncTask, CronJob } from "toad-scheduler";
 
 import { transit } from "../db/schema";
 import swisseph from "../lib/swisseph";
-import { getAngleDiff, getAspect, getExactAngle, signs } from "../utils/natalUtils";
+import {
+    getAngleDiff,
+    getAspect,
+    getExactAngle,
+    SINGS_MAP,
+    TransitAspects,
+    TransitAspectsPlanet,
+    TransitPlanets,
+} from "../utils/natalUtils";
 
 dayjs.extend(utc);
 
@@ -21,35 +29,38 @@ function getJulianDate(date: Date) {
     );
 }
 
-function getPlanet(jd: number, planet: number) {
-    const result = swisseph.swe_calc_ut(jd, planet, swisseph.SEFLG_SWIEPH);
+export function getPlanetPosition(jd: number, planet: number) {
+    const result = swisseph.swe_calc_ut(jd, planet, swisseph.SEFLG_SWIEPH | swisseph.SEFLG_SPEED);
 
     if ("error" in result) {
         throw new Error(result.error);
     }
 
-    if (!("longitude" in result)) {
+    if (!("longitude" in result) || !("longitudeSpeed" in result)) {
         throw new Error("Invalid result from swe_calc_ut");
     }
 
-    const degree = result.longitude;
+    const signIndex = Math.floor(result.longitude / 30);
 
     return {
-        degree,
-        sign: signs[Math.floor(degree / 30)],
+        sign: SINGS_MAP[signIndex],
+        signIndex,
+        longitude: result.longitude,
+        speed: result.longitudeSpeed,
+        retrograde: result.longitudeSpeed < 0,
     };
 }
 
-function computeAspects(planets: Record<string, { degree: number }>) {
+function computeAspects(planets: Partial<Record<TransitAspectsPlanet, { longitude: number }>>): TransitAspects {
     const entries = Object.entries(planets);
-    const aspects = [];
+    const aspects: TransitAspects = [];
 
     for (let i = 0; i < entries.length; i++) {
         for (let j = i + 1; j < entries.length; j++) {
-            const [p1, v1] = entries[i];
-            const [p2, v2] = entries[j];
+            const [p1, v1] = entries[i] as [TransitAspectsPlanet, { longitude: number }];
+            const [p2, v2] = entries[j] as [TransitAspectsPlanet, { longitude: number }];
 
-            const diff = getAngleDiff(v1.degree, v2.degree);
+            const diff = getAngleDiff(v1.longitude, v2.longitude);
             const aspect = getAspect(diff);
 
             if (aspect) {
@@ -65,19 +76,31 @@ function computeAspects(planets: Record<string, { degree: number }>) {
     return aspects;
 }
 
-export function computeTransits(date: Date) {
+export function computePlanetPositions(date: Date) {
     const jd = getJulianDate(date);
 
-    const planets = {
-        sun: getPlanet(jd, swisseph.SE_SUN),
-        moon: getPlanet(jd, swisseph.SE_MOON),
-        mercury: getPlanet(jd, swisseph.SE_MERCURY),
-        venus: getPlanet(jd, swisseph.SE_VENUS),
-        mars: getPlanet(jd, swisseph.SE_MARS),
-        saturn: getPlanet(jd, swisseph.SE_SATURN),
+    return {
+        sun: getPlanetPosition(jd, swisseph.SE_SUN),
+        moon: getPlanetPosition(jd, swisseph.SE_MOON),
+        mercury: getPlanetPosition(jd, swisseph.SE_MERCURY),
+        venus: getPlanetPosition(jd, swisseph.SE_VENUS),
+        mars: getPlanetPosition(jd, swisseph.SE_MARS),
+        jupiter: getPlanetPosition(jd, swisseph.SE_JUPITER),
+        saturn: getPlanetPosition(jd, swisseph.SE_SATURN),
+        uranus: getPlanetPosition(jd, swisseph.SE_URANUS),
+        neptune: getPlanetPosition(jd, swisseph.SE_NEPTUNE),
+        pluto: getPlanetPosition(jd, swisseph.SE_PLUTO),
     };
+}
 
-    const aspects = computeAspects(planets);
+export function computeTransits(date: Date): {
+    date: string;
+    planets: TransitPlanets;
+    aspects: TransitAspects;
+} {
+    const planets = computePlanetPositions(date);
+
+    const aspects: TransitAspects = computeAspects(planets);
 
     return {
         date: dayjs.utc(date).format("YYYY-MM-DD"),

@@ -29,6 +29,111 @@
       "when": 1781711518694,
       "tag": "0003_tan_mad_thinker",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784132705706,
+      "tag": "0004_medical_galactus",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784222242407,
+      "tag": "0005_military_shen",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784222268897,
+      "tag": "0006_ambiguous_silk_fever",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1784223454636,
+      "tag": "0007_gifted_la_nuit",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1784223488953,
+      "tag": "0008_busy_johnny_storm",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1784309465691,
+      "tag": "0009_tidy_boom_boom",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1784370319663,
+      "tag": "0010_lowly_tenebrous",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1784383876335,
+      "tag": "0011_magical_guardsmen",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1784384288830,
+      "tag": "0012_clean_deadpool",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1784906130064,
+      "tag": "0013_tiresome_edwin_jarvis",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1785174226833,
+      "tag": "0014_messy_alex_power",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1785684344681,
+      "tag": "0015_serious_captain_marvel",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1785703290914,
+      "tag": "0016_daffy_bromley",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1785703312063,
+      "tag": "0017_cynical_patriot",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1785703968760,
+      "tag": "0018_harsh_carmella_unuscione",
+      "breakpoints": true
     }
   ]
 }

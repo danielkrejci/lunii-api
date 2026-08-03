@@ -1,0 +1,1 @@
+ALTER TABLE "compatibility_people" ALTER COLUMN "birth_chart" SET NOT NULL;

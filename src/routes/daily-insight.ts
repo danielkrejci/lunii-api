@@ -27,16 +27,46 @@ export default (async (fastify) => {
                     200: z.object({
                         data: z.object({
                             date: z.string(),
-                            horoscope: z.string(),
-                            moonInsight: z.string(),
-                            focus: z.string().array(),
-                            caution: z.string().array(),
-                            do: z.string(),
-                            avoid: z.string(),
-                            scoreLove: z.number(),
-                            scoreCareer: z.number(),
-                            scoreHealth: z.number(),
-                            scoreMood: z.number(),
+                            overview: z.object({
+                                title: z.string(),
+                                description: z.string(),
+                            }),
+                            moon: z.object({
+                                phase: z.string(),
+                                insight: z.string(),
+                                reason: z.string(),
+                            }),
+                            insights: z.object({
+                                love: z.object({
+                                    score: z.number(),
+                                    insight: z.string(),
+                                    reason: z.string(),
+                                }),
+                                career: z.object({
+                                    score: z.number(),
+                                    insight: z.string(),
+                                    reason: z.string(),
+                                }),
+                                health: z.object({
+                                    score: z.number(),
+                                    insight: z.string(),
+                                    reason: z.string(),
+                                }),
+                                mood: z.object({
+                                    score: z.number(),
+                                    insight: z.string(),
+                                    reason: z.string(),
+                                }),
+                            }),
+                            opportunity: z.object({
+                                description: z.string(),
+                                examples: z.array(z.string()),
+                            }),
+                            watchOut: z.object({
+                                description: z.string(),
+                                examples: z.array(z.string()),
+                            }),
+                            deepInsight: z.string(),
                         }),
                     }),
                     400: z.object({
@@ -92,26 +122,45 @@ export default (async (fastify) => {
 
                 if (insightsData.length > 0) {
                     console.info("using cached insights");
+
+                    const result = insightsData[0];
+                    // await new Promise((resolve) => setTimeout(resolve, 3000));
+
                     return reply.status(200).send({
                         data: serializeDrizzleData({
                             date: transitData.date,
-                            horoscope: insightsData[0].horoscope,
-                            moonInsight: insightsData[0].moonInsight,
-                            focus: insightsData[0].focus,
-                            caution: insightsData[0].caution,
-                            do: insightsData[0].do,
-                            avoid: insightsData[0].avoid,
-                            scoreLove: insightsData[0].scoreLove,
-                            scoreCareer: insightsData[0].scoreCareer,
-                            scoreHealth: insightsData[0].scoreHealth,
-                            scoreMood: insightsData[0].scoreMood,
+                            overview: result.overview,
+                            moon: result.moon,
+                            insights: {
+                                love: {
+                                    score: result.loveInsight.score,
+                                    insight: result.loveInsight.insight,
+                                    reason: result.loveInsight.reason,
+                                },
+                                career: {
+                                    score: result.careerInsight.score,
+                                    insight: result.careerInsight.insight,
+                                    reason: result.careerInsight.reason,
+                                },
+                                health: {
+                                    score: result.healthInsight.score,
+                                    insight: result.healthInsight.insight,
+                                    reason: result.healthInsight.reason,
+                                },
+                                mood: {
+                                    score: result.moodInsight.score,
+                                    insight: result.moodInsight.insight,
+                                    reason: result.moodInsight.reason,
+                                },
+                            },
+                            opportunity: result.opportunity,
+                            watchOut: result.watchOut,
+                            deepInsight: result.deepInsight,
                         }),
                     });
                 }
 
-                console.info("generating insights data");
-
-                const date = dayjs.utc(request.query.date).format("YYYY-MM-DD");
+                console.info("generating insights data...");
 
                 const transits: DailyTransits = {
                     planets: transitData.planets as DailyTransits["planets"],
@@ -119,44 +168,65 @@ export default (async (fastify) => {
                 };
 
                 const result = await generateDailyInsight({
-                    sunSign: session.profile.sunSign,
-                    moonSign: session.profile.moonSign,
-                    transits: transits,
-                    // contentPreference: session.profile.contentPreference,
-                    // priorities: session.profile.areasOfInterest,
-                    // goals: session.profile.goalsForTheYear,
-                    // relationshipStatus: session.profile.relationshipStatus,
+                    goals: session.profile.goalsForTheYear,
                     language: session.profile.language,
+                    moonSign: session.profile.moonSign,
+                    priorities: session.profile.areasOfInterest,
+                    relationshipStatus: session.profile.relationshipStatus,
+                    sunSign: session.profile.sunSign,
+                    transits: transits,
                 });
 
                 await fastify.db.insert(dailyInsights).values({
                     date: dayjs.utc(request.query.date).format("YYYY-MM-DD"),
                     userId: session.user.id,
-                    horoscope: result.horoscope,
-                    moonInsight: result.moonInsight,
-                    focus: result.focus,
-                    caution: result.caution,
-                    do: result.do,
-                    avoid: result.avoid,
-                    scoreLove: result.scores.love,
-                    scoreCareer: result.scores.career,
-                    scoreHealth: result.scores.health,
-                    scoreMood: result.scores.mood,
+                    overview: result.overview,
+                    moon: result.moon,
+                    loveScore: result.insights.love.score,
+                    loveInsight: result.insights.love,
+                    careerScore: result.insights.career.score,
+                    careerInsight: result.insights.career,
+                    healthScore: result.insights.health.score,
+                    healthInsight: result.insights.health,
+                    moodScore: result.insights.mood.score,
+                    moodInsight: result.insights.mood,
+                    opportunity: result.opportunity,
+                    watchOut: result.watchOut,
+                    deepInsight: result.deepInsight,
+                    rawResponse: result.rawResponse,
+                    rawInput: result.rawInput,
                 });
 
                 return reply.status(200).send({
                     data: {
                         date: transitData.date,
-                        horoscope: result.horoscope,
-                        moonInsight: result.moonInsight,
-                        focus: result.focus,
-                        caution: result.caution,
-                        do: result.do,
-                        avoid: result.avoid,
-                        scoreLove: result.scores.love,
-                        scoreCareer: result.scores.career,
-                        scoreHealth: result.scores.health,
-                        scoreMood: result.scores.mood,
+                        overview: result.overview,
+                        moon: result.moon,
+                        insights: {
+                            love: {
+                                score: result.insights.love.score,
+                                insight: result.insights.love.insight,
+                                reason: result.insights.love.reason,
+                            },
+                            career: {
+                                score: result.insights.career.score,
+                                insight: result.insights.career.insight,
+                                reason: result.insights.career.reason,
+                            },
+                            health: {
+                                score: result.insights.health.score,
+                                insight: result.insights.health.insight,
+                                reason: result.insights.health.reason,
+                            },
+                            mood: {
+                                score: result.insights.mood.score,
+                                insight: result.insights.mood.insight,
+                                reason: result.insights.mood.reason,
+                            },
+                        },
+                        opportunity: result.opportunity,
+                        watchOut: result.watchOut,
+                        deepInsight: result.deepInsight,
                     },
                 });
             } catch (e: any) {
