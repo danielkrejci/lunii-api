@@ -22,13 +22,15 @@ export default (async (fastify: FastifyInstance) => {
                     200: z.object({
                         data: z.boolean(),
                     }),
-                    400: z.object({
+                    401: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
-                    401: z.object({
+                    500: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -43,7 +45,8 @@ export default (async (fastify: FastifyInstance) => {
             if (!session) {
                 return reply.status(401).send({
                     error: {
-                        message: "Unauthorized",
+                        code: "unauthorized",
+                        message: "User must be logged in to access this resource.",
                     },
                 });
             }
@@ -58,15 +61,15 @@ export default (async (fastify: FastifyInstance) => {
                     data: true,
                 });
             } catch (error: unknown) {
-                const errorMessage =
-                    error instanceof Error
-                        ? error.message
-                        : typeof error === "object" && error !== null && "detail" in error
-                          ? String(error.detail)
-                          : "Error";
-                reply.status(400).send({
+                const isDev = process.env.NODE_ENV !== "production";
+
+                request.log.error({ err: error }, "Failed to update notification token");
+
+                return reply.status(500).send({
                     error: {
-                        message: errorMessage,
+                        code: "error",
+                        message:
+                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },
                 });
             }

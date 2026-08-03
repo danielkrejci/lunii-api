@@ -22,21 +22,25 @@ export default (async (fastify) => {
                     }),
                     400: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     401: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
-                    404: z.object({
+                    409: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     500: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -51,7 +55,8 @@ export default (async (fastify) => {
             if (!session) {
                 return reply.status(401).send({
                     error: {
-                        message: "Unauthorized",
+                        code: "unauthorized",
+                        message: "User must be logged in to access this resource.",
                     },
                 });
             }
@@ -60,8 +65,9 @@ export default (async (fastify) => {
                 const file = await request.file();
 
                 if (!file) {
-                    return reply.status(400).send({
+                    return reply.status(409).send({
                         error: {
+                            code: "image_not_provided",
                             message: "No image file provided",
                         },
                     });
@@ -77,6 +83,7 @@ export default (async (fastify) => {
                 ) {
                     return reply.status(400).send({
                         error: {
+                            code: "compatibility_person_not_found",
                             message: "Compatibility person not found",
                         },
                     });
@@ -95,8 +102,9 @@ export default (async (fastify) => {
                     .then(takeUniqueOrThrow);
 
                 if (!compativilityPerson) {
-                    return reply.status(404).send({
+                    return reply.status(409).send({
                         error: {
+                            code: "compatibility_person_not_found",
                             message: "Compatibility person not found",
                         },
                     });
@@ -105,6 +113,7 @@ export default (async (fastify) => {
                 if (!SUPPORTED_IMAGE_TYPES.includes(file.mimetype as (typeof SUPPORTED_IMAGE_TYPES)[number])) {
                     return reply.status(400).send({
                         error: {
+                            code: "unsupported_image_type",
                             message: `Unsupported image type: ${file.mimetype}. Supported: ${SUPPORTED_IMAGE_TYPES.join(", ")}`,
                         },
                     });
@@ -115,6 +124,7 @@ export default (async (fastify) => {
                 if (imageBuffer.length > MAX_IMAGE_SIZE) {
                     return reply.status(400).send({
                         error: {
+                            code: "image_too_large",
                             message: `Image too large. Maximum size: ${MAX_IMAGE_SIZE / 1024 / 1024}MB`,
                         },
                     });
@@ -159,6 +169,7 @@ export default (async (fastify) => {
 
                 return reply.status(500).send({
                     error: {
+                        code: "error",
                         message:
                             isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },

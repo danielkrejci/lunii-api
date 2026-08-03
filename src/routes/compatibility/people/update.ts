@@ -44,23 +44,27 @@ export default (async (fastify) => {
                             compatibilityPersonId: z.string(),
                         }),
                     }),
-                    400: z.object({
-                        error: z.object({
-                            message: z.string(),
-                        }),
-                    }),
                     401: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     404: z.object({
                         error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
+                    409: z.object({
+                        error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     500: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -72,10 +76,20 @@ export default (async (fastify) => {
                 headers: fromNodeHeaders(request.headers),
             });
 
-            if (!session || !session.profile) {
+            if (!session) {
                 return reply.status(401).send({
                     error: {
-                        message: "Unauthorized",
+                        code: "unauthorized",
+                        message: "User must be logged in to access this resource.",
+                    },
+                });
+            }
+
+            if (!session.profile) {
+                return reply.status(409).send({
+                    error: {
+                        code: "profile_required",
+                        message: "User must complete onboarding before accessing this resource.",
                     },
                 });
             }
@@ -145,7 +159,12 @@ export default (async (fastify) => {
                     const houses = swisseph.swe_houses(jd, request.body.birthPlaceLat, request.body.birthPlaceLng, "P");
 
                     if ("error" in houses) {
-                        return reply.status(400).send({ error: { message: houses.error } });
+                        return reply.status(409).send({
+                            error: {
+                                code: "transit_calculation_error",
+                                message: houses.error,
+                            },
+                        });
                     }
 
                     risingSign = SINGS_MAP[Math.floor(houses.ascendant / 30)];
@@ -159,8 +178,9 @@ export default (async (fastify) => {
                     .then(takeUniqueOrThrow);
 
                 if (!transits) {
-                    return reply.status(404).send({
+                    return reply.status(409).send({
                         error: {
+                            code: "transit_not_found",
                             message: "No transits found for this date",
                         },
                     });
@@ -287,10 +307,11 @@ export default (async (fastify) => {
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 
-                request.log.error({ err: error }, "Failed to list compatibility people");
+                request.log.error({ err: error }, "Failed to update compatibility person");
 
                 return reply.status(500).send({
                     error: {
+                        code: "error",
                         message:
                             isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },

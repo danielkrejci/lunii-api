@@ -1,4 +1,5 @@
 import { ai } from "../../lib/ai";
+import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageUtils";
 import { Gender, Relationship, ZodiacSign } from "../../utils/natalUtils";
 import { parseLLMJson } from "../../utils/stringUtils";
 import { Category, RelationshipCategory } from "./types";
@@ -567,7 +568,7 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
 
         Respond ONLY in:
 
-        ${language} language.
+        ${language}
 
         ==================================================
         INPUT DATA
@@ -577,8 +578,10 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
         `;
 }
 
-export async function generateDailyOverview(language: string, input: DailyCompatibilityAiInput) {
-    const prompt = buildPrompt(language, input);
+export async function generateDailyOverview(languageIso: string, input: DailyCompatibilityAiInput) {
+    const language = getLanguageByIso(languageIso);
+
+    const prompt = buildPrompt(language ? buildPromptLanguageRule(language) : languageIso, input);
 
     const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",

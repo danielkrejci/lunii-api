@@ -23,16 +23,13 @@ export default (async (fastify) => {
                     }),
                     401: z.object({
                         error: z.object({
-                            message: z.string(),
-                        }),
-                    }),
-                    404: z.object({
-                        error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     500: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -47,7 +44,8 @@ export default (async (fastify) => {
             if (!session) {
                 return reply.status(401).send({
                     error: {
-                        message: "Unauthorized",
+                        code: "Unauthorized",
+                        message: "User must be logged in to access this resource.",
                     },
                 });
             }
@@ -64,14 +62,6 @@ export default (async (fastify) => {
                         )
                     )
                     .then(takeUniqueOrThrow);
-
-                if (!compativilityPerson) {
-                    return reply.status(404).send({
-                        error: {
-                            message: "Compatibility person not found",
-                        },
-                    });
-                }
 
                 // remove the image from R2 storage if one exists
                 if (compativilityPerson.image) {
@@ -105,6 +95,7 @@ export default (async (fastify) => {
 
                 return reply.status(500).send({
                     error: {
+                        code: "error",
                         message:
                             isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },

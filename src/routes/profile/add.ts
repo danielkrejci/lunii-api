@@ -2,6 +2,7 @@ import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
+import { eq } from "drizzle-orm";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { find as geoTz } from "geo-tz";
@@ -84,11 +85,25 @@ export default (async (fastify) => {
                     }),
                     400: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     401: z.object({
                         error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
+                    409: z.object({
+                        error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
+                    500: z.object({
+                        error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -103,12 +118,25 @@ export default (async (fastify) => {
             if (!session) {
                 return reply.status(401).send({
                     error: {
-                        message: "Unauthorized",
+                        code: "Unauthorized",
+                        message: "User must be logged in to access this resource.",
                     },
                 });
             }
 
             try {
+                // check if the user already has a profile
+                const profileData = await fastify.db.select().from(profile).where(eq(profile.userId, session.user.id));
+
+                if (profileData.length > 0) {
+                    return reply.status(409).send({
+                        error: {
+                            code: "profile_already_exists",
+                            message: "Profile already exists",
+                        },
+                    });
+                }
+
                 const detectedTimezone = geoTz(request.body.birthPlaceLat, request.body.birthPlaceLng)[0] || "UTC";
 
                 const birthDate = dayjs(request.body.birthDate);
@@ -171,10 +199,16 @@ export default (async (fastify) => {
                 reply.status(200).send({
                     data: true,
                 });
-            } catch (e: any) {
-                reply.status(400).send({
+            } catch (error: unknown) {
+                const isDev = process.env.NODE_ENV !== "production";
+
+                request.log.error({ err: error }, "Failed to add profile");
+
+                return reply.status(500).send({
                     error: {
-                        message: "detail" in e ? e.detail : "message" in e ? e.message : "Error",
+                        code: "error",
+                        message:
+                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },
                 });
             }

@@ -29,18 +29,27 @@ export default (async (fastify) => {
                             aspects: z.any(),
                         }),
                     }),
-                    400: z.object({
-                        error: z.object({
-                            message: z.string(),
-                        }),
-                    }),
                     401: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     404: z.object({
                         error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
+                    409: z.object({
+                        error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
+                    500: z.object({
+                        error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -55,7 +64,8 @@ export default (async (fastify) => {
             if (!session) {
                 return reply.status(401).send({
                     error: {
-                        message: "Unauthorized",
+                        code: "unauthorized",
+                        message: "User must be logged in to access this resource.",
                     },
                 });
             }
@@ -64,8 +74,9 @@ export default (async (fastify) => {
                 const data = await fastify.db.select().from(transit).where(eq(transit.date, request.query.date));
 
                 if (!data) {
-                    return reply.status(404).send({
+                    return reply.status(409).send({
                         error: {
+                            code: "transit_not_found",
                             message: "No transits found for this date",
                         },
                     });
@@ -78,10 +89,16 @@ export default (async (fastify) => {
                         aspects: data[0].aspects,
                     },
                 });
-            } catch (e: any) {
-                return reply.status(400).send({
+            } catch (error: unknown) {
+                const isDev = process.env.NODE_ENV !== "production";
+
+                request.log.error({ err: error }, "Failed to get transits");
+
+                return reply.status(500).send({
                     error: {
-                        message: "detail" in e ? e.detail : "message" in e ? e.message : "Error",
+                        code: "error",
+                        message:
+                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },
                 });
             }

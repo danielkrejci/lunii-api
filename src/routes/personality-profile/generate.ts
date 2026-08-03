@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import { ai } from "../../lib/ai";
 import swisseph from "../../lib/swisseph";
+import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageUtils";
 import { Gender, Genders, SINGS_MAP } from "../../utils/natalUtils";
 import { parseLLMJson } from "../../utils/stringUtils";
 import { MIN_AGE } from "../profile/add";
@@ -70,13 +71,15 @@ export default (async (fastify) => {
                             personalityProfileInput: z.string(),
                         }),
                     }),
-                    400: z.object({
+                    409: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
-                    401: z.object({
+                    500: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -109,11 +112,21 @@ export default (async (fastify) => {
             const moonResult = swisseph.swe_calc_ut(jdMoon, swisseph.SE_MOON, 0);
 
             if ("error" in moonResult) {
-                return reply.status(400).send({ error: { message: moonResult.error } });
+                return reply.status(409).send({
+                    error: {
+                        code: "transit_calculation_error",
+                        message: moonResult.error,
+                    },
+                });
             }
 
             if (!("longitude" in moonResult)) {
-                return reply.status(400).send({ error: { message: "Moon sign not found" } });
+                return reply.status(409).send({
+                    error: {
+                        code: "transit_calculation_error",
+                        message: "Moon sign not found",
+                    },
+                });
             }
 
             const moonSign = SINGS_MAP[Math.floor(moonResult.longitude / 30)];
@@ -135,10 +148,17 @@ export default (async (fastify) => {
             );
 
             if ("error" in houses) {
-                return reply.status(400).send({ error: { message: houses.error } });
+                return reply.status(409).send({
+                    error: {
+                        code: "transit_calculation_error",
+                        message: houses.error,
+                    },
+                });
             }
 
             const risingSign = SINGS_MAP[Math.floor(houses.ascendant / 30)];
+
+            const language = getLanguageByIso(request.body.language);
 
             // get personality profile from AI
             try {
@@ -180,7 +200,7 @@ export default (async (fastify) => {
                     - modern and grounded
 
                     Language:
-                    - Respond in ${request.body.language}
+                    - Respond only in ${language ? buildPromptLanguageRule(language) : request.body.language}
 
                     User data:
                     - Sun sign: ${request.body.sunSign}
@@ -234,10 +254,16 @@ export default (async (fastify) => {
                         personalityProfileInput: prompt,
                     },
                 });
-            } catch (e: any) {
-                return reply.status(400).send({
+            } catch (error: unknown) {
+                const isDev = process.env.NODE_ENV !== "production";
+
+                request.log.error({ err: error }, "Failed to generate personality profile");
+
+                return reply.status(500).send({
                     error: {
-                        message: "detail" in e ? e.detail : "message" in e ? e.message : "Error",
+                        code: "error",
+                        message:
+                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },
                 });
             }

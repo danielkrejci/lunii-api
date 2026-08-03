@@ -7,7 +7,7 @@ import { importPKCS8, SignJWT } from "jose";
 
 import { db } from "../db";
 import * as schema from "../db/schema";
-import { profile } from "../db/schema";
+import { account, profile } from "../db/schema";
 import { env } from "../env";
 import { serializeDrizzleData } from "../utils/drizzleUtils";
 
@@ -66,18 +66,33 @@ const config = {
                     .orderBy(desc(profile.createdAt))
                     .limit(1);
 
+                console.log("profileData", profileData);
+
                 if (profileData.length === 0) {
                     return {
                         user: sessionUser,
                         session,
                         profile: null,
+                        accounts: [],
                     };
                 }
+
+                const accounts = await db
+                    .select({
+                        id: account.id,
+                        accountId: account.id,
+                        providerId: account.providerId,
+                        createdAt: account.createdAt,
+                        updatedAt: account.updatedAt,
+                    })
+                    .from(account)
+                    .where(eq(account.userId, sessionUser.id));
 
                 return {
                     user: sessionUser,
                     session,
                     profile: serializeDrizzleData(profileData[0]),
+                    accounts,
                 };
             } catch (error) {
                 console.error("customSession: failed to load profile", error);
@@ -85,6 +100,7 @@ const config = {
                     user: sessionUser,
                     session,
                     profile: null,
+                    accounts: [],
                 };
             }
         }),
@@ -102,10 +118,10 @@ const config = {
     }),
     baseURL: env.BETTER_AUTH_URL,
     socialProviders: {
-        // google: {
-        //     clientId: env.GOOGLE_CLIENT_ID,
-        //     clientSecret: env.GOOGLE_CLIENT_SECRET,
-        // },
+        google: {
+            clientId: env.GOOGLE_CLIENT_ID,
+            clientSecret: env.GOOGLE_CLIENT_SECRET,
+        },
         apple: async () => ({
             clientId: env.APPLE_CLIENT_ID,
             clientSecret: await generateAppleClientSecret(),

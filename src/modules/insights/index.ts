@@ -1,4 +1,5 @@
 import { ai } from "../../lib/ai";
+import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageUtils";
 import { ZodiacSign } from "../../utils/natalUtils";
 import { getLLMJson, parseLLMJson } from "../../utils/stringUtils";
 import { getMoonPhase } from "../transits";
@@ -1639,7 +1640,7 @@ If different influences conflict, create a believable balance instead of ignorin
 The reader should immediately feel that today's horoscope is unique.
 
 Respond only in:
-${language} language.
+${language}.
 `;
 }
 
@@ -1695,7 +1696,7 @@ export async function generateDailyInsight(input: {
     transits: DailyTransits;
     sunSign: string;
     moonSign: string;
-    language: string;
+    languageIso: string;
     relationshipStatus?: string;
     priorities?: string[];
     goals?: string[];
@@ -1707,13 +1708,15 @@ export async function generateDailyInsight(input: {
 > {
     const analysis = analyzeTransits(input.transits);
 
+    const language = getLanguageByIso(input.languageIso);
+
     const prompt = buildPrompt({
         analysis,
         sunSign: input.sunSign,
         moonSign: input.moonSign,
         relationshipStatus: input.relationshipStatus,
         priorities: input.priorities,
-        language: input.language,
+        language: language ? buildPromptLanguageRule(language) : input.languageIso,
     });
 
     const response = await ai.models.generateContent({

@@ -69,18 +69,27 @@ export default (async (fastify) => {
                             deepInsight: z.string(),
                         }),
                     }),
-                    400: z.object({
-                        error: z.object({
-                            message: z.string(),
-                        }),
-                    }),
                     401: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     404: z.object({
                         error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
+                    409: z.object({
+                        error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
+                    500: z.object({
+                        error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -92,10 +101,20 @@ export default (async (fastify) => {
                 headers: fromNodeHeaders(request.headers),
             });
 
-            if (!session || !session.profile) {
+            if (!session) {
                 return reply.status(401).send({
                     error: {
-                        message: "Unauthorized",
+                        code: "unauthorized",
+                        message: "User must be logged in to access this resource.",
+                    },
+                });
+            }
+
+            if (!session.profile) {
+                return reply.status(409).send({
+                    error: {
+                        code: "profile_required",
+                        message: "User must complete onboarding before accessing this resource.",
                     },
                 });
             }
@@ -108,8 +127,9 @@ export default (async (fastify) => {
                     .then(takeUniqueOrThrow);
 
                 if (!transitData) {
-                    return reply.status(404).send({
+                    return reply.status(409).send({
                         error: {
+                            code: "transit_not_found",
                             message: "No transits found for this date",
                         },
                     });
@@ -121,8 +141,6 @@ export default (async (fastify) => {
                     .where(and(eq(dailyInsights.userId, session.user.id), eq(dailyInsights.date, request.query.date)));
 
                 if (insightsData.length > 0) {
-                    console.info("using cached insights");
-
                     const result = insightsData[0];
                     // await new Promise((resolve) => setTimeout(resolve, 3000));
 
@@ -160,8 +178,6 @@ export default (async (fastify) => {
                     });
                 }
 
-                console.info("generating insights data...");
-
                 const transits: DailyTransits = {
                     planets: transitData.planets as DailyTransits["planets"],
                     aspects: transitData.aspects as DailyTransits["aspects"],
@@ -169,7 +185,7 @@ export default (async (fastify) => {
 
                 const result = await generateDailyInsight({
                     goals: session.profile.goalsForTheYear,
-                    language: session.profile.language,
+                    languageIso: session.profile.language,
                     moonSign: session.profile.moonSign,
                     priorities: session.profile.areasOfInterest,
                     relationshipStatus: session.profile.relationshipStatus,
@@ -229,10 +245,16 @@ export default (async (fastify) => {
                         deepInsight: result.deepInsight,
                     },
                 });
-            } catch (e: any) {
-                return reply.status(400).send({
+            } catch (error: unknown) {
+                const isDev = process.env.NODE_ENV !== "production";
+
+                request.log.error({ err: error }, "Failed to generate daily insight");
+
+                return reply.status(500).send({
                     error: {
-                        message: "detail" in e ? e.detail : "message" in e ? e.message : "Error",
+                        code: "error",
+                        message:
+                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },
                 });
             }

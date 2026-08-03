@@ -33,13 +33,9 @@ export default (async (fastify) => {
                             query: z.string(),
                         }),
                     }),
-                    400: z.object({
+                    500: z.object({
                         error: z.object({
-                            message: z.string(),
-                        }),
-                    }),
-                    401: z.object({
-                        error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -168,10 +164,16 @@ export default (async (fastify) => {
                         query,
                     }),
                 });
-            } catch (e: any) {
-                return reply.status(400).send({
+            } catch (error: unknown) {
+                const isDev = process.env.NODE_ENV !== "production";
+
+                request.log.error({ err: error }, "Failed to search places");
+
+                return reply.status(500).send({
                     error: {
-                        message: "detail" in e ? e.detail : "message" in e ? e.message : "Error",
+                        code: "error",
+                        message:
+                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },
                 });
             }

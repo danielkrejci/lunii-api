@@ -23,16 +23,19 @@ export default (async (fastify) => {
                     }),
                     401: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
-                    404: z.object({
+                    409: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
                     500: z.object({
                         error: z.object({
+                            code: z.string(),
                             message: z.string(),
                         }),
                     }),
@@ -47,7 +50,8 @@ export default (async (fastify) => {
             if (!session) {
                 return reply.status(401).send({
                     error: {
-                        message: "Unauthorized",
+                        code: "unauthorized",
+                        message: "User must be logged in to access this resource.",
                     },
                 });
             }
@@ -66,8 +70,9 @@ export default (async (fastify) => {
                     .then(takeUniqueOrThrow);
 
                 if (!compativilityPerson) {
-                    return reply.status(404).send({
+                    return reply.status(409).send({
                         error: {
+                            code: "compatibility_person_not_found",
                             message: "Compatibility person not found",
                         },
                     });
@@ -103,10 +108,11 @@ export default (async (fastify) => {
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 
-                request.log.error({ err: error }, "Failed to list compatibility people");
+                request.log.error({ err: error }, "Failed to remove compatibility person");
 
                 return reply.status(500).send({
                     error: {
+                        code: "error",
                         message:
                             isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },
