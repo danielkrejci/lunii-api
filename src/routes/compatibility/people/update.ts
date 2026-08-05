@@ -8,13 +8,11 @@ import { z } from "zod";
 
 import { compatibilityPeople, compatibilityPeopleScores, transit } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
-import swisseph from "../../../lib/swisseph";
+import { computeNatalChart, EphemerisError } from "../../../modules/astro";
 import { calculateCompatibility, calculateDailyCompatibility } from "../../../modules/compatibilityPeople/aspects";
 import { BASE_NORMALIZER, normalizeScore, OVERALL_NORMALIZER } from "../../../modules/compatibilityPeople/normalizer";
-import { NatalChart } from "../../../modules/compatibilityPeople/types";
-import { getPlanetPosition } from "../../../modules/transits";
 import { serializeDrizzleData, takeUniqueOrThrow } from "../../../utils/drizzleUtils";
-import { Genders, getSunSign, Relationships, SINGS_MAP, ZodiacSign } from "../../../utils/natalUtils";
+import { Genders, getSunSign, Relationships, ZodiacSign } from "../../../utils/natalUtils";
 import { MIN_AGE } from "../../profile/add";
 
 export default (async (fastify) => {
@@ -117,58 +115,20 @@ export default (async (fastify) => {
                     }
                 }
 
-                const birthDate = dayjs(request.body.birthDate);
-                const birthTime = request.body.birthTime ? dayjs(request.body.birthTime) : dayjs().hour(12).minute(0);
-
-                // Compute absolute birth date
-                const absoluteBirthDate = dayjs
-                    .tz(birthDate.format("YYYY-MM-DD"), timezone)
-                    .hour(birthTime.hour())
-                    .minute(birthTime.minute())
-                    .second(0)
-                    .millisecond(0)
-                    .toDate();
-
-                // Compute julian day
-                const jd = swisseph.swe_julday(
-                    absoluteBirthDate.getUTCFullYear(),
-                    absoluteBirthDate.getUTCMonth() + 1,
-                    absoluteBirthDate.getUTCDate(),
-                    absoluteBirthDate.getUTCHours() + absoluteBirthDate.getUTCMinutes() / 60,
-                    swisseph.SE_GREG_CAL
-                );
-
-                // Compute birth chart
-                const birthChart: NatalChart = {
-                    sun: getPlanetPosition(jd, swisseph.SE_SUN),
-                    moon: getPlanetPosition(jd, swisseph.SE_MOON),
-                    mercury: getPlanetPosition(jd, swisseph.SE_MERCURY),
-                    venus: getPlanetPosition(jd, swisseph.SE_VENUS),
-                    mars: getPlanetPosition(jd, swisseph.SE_MARS),
-                    jupiter: getPlanetPosition(jd, swisseph.SE_JUPITER),
-                    saturn: getPlanetPosition(jd, swisseph.SE_SATURN),
-                };
+                // Compute birth chart: 10 planets, plus the Ascendant when the birth time is known
+                const { chart: birthChart } = computeNatalChart({
+                    birthDate: request.body.birthDate,
+                    birthTime: request.body.birthTime,
+                    birthPlaceLat: request.body.birthPlaceLat,
+                    birthPlaceLng: request.body.birthPlaceLng,
+                    timezone,
+                });
 
                 // Compute moon sign
                 const moonSign: ZodiacSign = birthChart.moon.sign;
 
-                let risingSign: ZodiacSign | null = null;
-
-                if (request.body.birthPlaceLat !== null && request.body.birthPlaceLng !== null) {
-                    // Compute risign sign
-                    const houses = swisseph.swe_houses(jd, request.body.birthPlaceLat, request.body.birthPlaceLng, "P");
-
-                    if ("error" in houses) {
-                        return reply.status(409).send({
-                            error: {
-                                code: "transit_calculation_error",
-                                message: houses.error,
-                            },
-                        });
-                    }
-
-                    risingSign = SINGS_MAP[Math.floor(houses.ascendant / 30)];
-                }
+                // null without a birth time — an Ascendant derived from an assumed noon is meaningless
+                const risingSign: ZodiacSign | null = birthChart.ascendant?.sign ?? null;
 
                 // Get transits for today
                 const transits = await fastify.db
@@ -306,6 +266,17 @@ export default (async (fastify) => {
                 });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
+
+                if (error instanceof EphemerisError) {
+                    request.log.error({ err: error }, "Failed to compute birth chart");
+
+                    return reply.status(409).send({
+                        error: {
+                            code: "transit_calculation_error",
+                            message: error.message,
+                        },
+                    });
+                }
 
                 request.log.error({ err: error }, "Failed to update compatibility person");
 

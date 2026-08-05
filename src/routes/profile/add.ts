@@ -6,13 +6,12 @@ import { eq } from "drizzle-orm";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { find as geoTz } from "geo-tz";
-import swisseph from "swisseph";
 import { z } from "zod";
 
 import { profile } from "../../db/schema";
 import { auth } from "../../lib/auth";
-import { NatalChart } from "../../modules/compatibilityPeople/types";
-import { getPlanetPosition } from "../../modules/transits";
+import { computeNatalChart, EphemerisError } from "../../modules/astro";
+import { backfillScoresForUser } from "../../modules/dailyScore/service";
 import { Gender, Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
 
 dayjs.extend(utc);
@@ -60,10 +59,11 @@ export default (async (fastify) => {
                         .string()
                         .min(1, "Please select your Moon sign.")
                         .refine((value) => SINGS_MAP.includes(value as ZodiacSign), "Invalid sign."),
+                    // Null when the birth time is unknown — see personality-profile/generate.
                     risingSign: z
                         .string()
-                        .min(1, "Please select your Rising sign.")
-                        .refine((value) => SINGS_MAP.includes(value as ZodiacSign), "Invalid sign."),
+                        .refine((value) => SINGS_MAP.includes(value as ZodiacSign), "Invalid sign.")
+                        .nullable(),
                     relationshipStatus: z.string().min(1, "Please select the option that best suits you."),
                     careerStage: z.string().min(1, "Please select the option that best suits you."),
                     decisionStyle: z.string().min(1, "Please select the option that best suits you."),
@@ -78,6 +78,7 @@ export default (async (fastify) => {
                     contentPreference: z.string().min(1, "Please select your content preference."),
                     beliefLevel: z.string().min(1, "Please select your belief level."),
                     personalityProfile: z.string().min(1, "Please select your personality profile."),
+                    personalityProfileInput: z.string().min(1, "Please select your personality profile input."),
                 }),
                 response: {
                     200: z.object({
@@ -139,35 +140,16 @@ export default (async (fastify) => {
 
                 const detectedTimezone = geoTz(request.body.birthPlaceLat, request.body.birthPlaceLng)[0] || "UTC";
 
-                const birthDate = dayjs(request.body.birthDate);
-                const birthTime = request.body.birthTime ? dayjs(request.body.birthTime) : dayjs().hour(12).minute(0);
+                // compute birth chart: 10 planets, plus the Ascendant when the birth time is known
+                const { chart: birthChart } = computeNatalChart({
+                    birthDate: request.body.birthDate,
+                    birthTime: request.body.birthTime,
+                    birthPlaceLat: request.body.birthPlaceLat,
+                    birthPlaceLng: request.body.birthPlaceLng,
+                    timezone: detectedTimezone,
+                });
 
-                const absoluteBirthDate = dayjs
-                    .tz(birthDate.format("YYYY-MM-DD"), detectedTimezone)
-                    .hour(birthTime.hour())
-                    .minute(birthTime.minute())
-                    .second(0)
-                    .millisecond(0)
-                    .toDate();
-
-                const jd = swisseph.swe_julday(
-                    absoluteBirthDate.getUTCFullYear(),
-                    absoluteBirthDate.getUTCMonth() + 1,
-                    absoluteBirthDate.getUTCDate(),
-                    absoluteBirthDate.getUTCHours() + absoluteBirthDate.getUTCMinutes() / 60,
-                    swisseph.SE_GREG_CAL
-                );
-
-                // compute birth chart
-                const birthChart: NatalChart = {
-                    sun: getPlanetPosition(jd, swisseph.SE_SUN),
-                    moon: getPlanetPosition(jd, swisseph.SE_MOON),
-                    mercury: getPlanetPosition(jd, swisseph.SE_MERCURY),
-                    venus: getPlanetPosition(jd, swisseph.SE_VENUS),
-                    mars: getPlanetPosition(jd, swisseph.SE_MARS),
-                    jupiter: getPlanetPosition(jd, swisseph.SE_JUPITER),
-                    saturn: getPlanetPosition(jd, swisseph.SE_SATURN),
-                };
+                const birthTime = request.body.birthTime ? dayjs(request.body.birthTime).format("HH:mm") : null;
 
                 await fastify.db.insert(profile).values({
                     userId: session.user.id,
@@ -175,7 +157,7 @@ export default (async (fastify) => {
                     referrer: request.body.referrer,
                     gender: request.body.gender as Gender,
                     birthDate: request.body.birthDate,
-                    birthTime: request.body.birthTime ? dayjs(request.body.birthTime).format("HH:mm") : null,
+                    birthTime,
                     birthPlace: request.body.birthPlace,
                     birthPlaceLat: request.body.birthPlaceLat,
                     birthPlaceLng: request.body.birthPlaceLng,
@@ -194,6 +176,22 @@ export default (async (fastify) => {
                     beliefLevel: request.body.beliefLevel,
                     personalityProfile: request.body.personalityProfile,
                     birthChart,
+                    personalityProfileInput: request.body.personalityProfileInput,
+                });
+
+                /**
+                 * Fill the score window right after onboarding. The session hook in lib/auth
+                 * cannot do it for a brand-new account: the session is created before the
+                 * profile exists, and sessions live long enough that a second create may be
+                 * months away.
+                 *
+                 * Fire and forget, as on sign-in — a backfill failure must not fail onboarding.
+                 */
+                void backfillScoresForUser(fastify.db, {
+                    userId: session.user.id,
+                    profile: { birthChart, birthTime },
+                }).catch((error) => {
+                    request.log.error({ err: error }, "backfillScoresForUser failed after onboarding");
                 });
 
                 reply.status(200).send({
@@ -201,6 +199,17 @@ export default (async (fastify) => {
                 });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
+
+                if (error instanceof EphemerisError) {
+                    request.log.error({ err: error }, "Failed to compute birth chart");
+
+                    return reply.status(409).send({
+                        error: {
+                            code: "transit_calculation_error",
+                            message: error.message,
+                        },
+                    });
+                }
 
                 request.log.error({ err: error }, "Failed to add profile");
 

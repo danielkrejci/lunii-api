@@ -4,52 +4,17 @@ import { FastifyInstance } from "fastify";
 import { AsyncTask, CronJob } from "toad-scheduler";
 
 import { transit } from "../db/schema";
-import swisseph from "../lib/swisseph";
 import {
     getAngleDiff,
     getAspect,
     getExactAngle,
-    SINGS_MAP,
     TransitAspects,
     TransitAspectsPlanet,
     TransitPlanets,
 } from "../utils/natalUtils";
+import { computeTransitChart } from "./astro";
 
 dayjs.extend(utc);
-
-function getJulianDate(date: Date) {
-    const hour = date.getUTCHours() + date.getUTCMinutes() / 60;
-
-    return swisseph.swe_julday(
-        date.getUTCFullYear(),
-        date.getUTCMonth() + 1,
-        date.getUTCDate(),
-        hour,
-        swisseph.SE_GREG_CAL
-    );
-}
-
-export function getPlanetPosition(jd: number, planet: number) {
-    const result = swisseph.swe_calc_ut(jd, planet, swisseph.SEFLG_SWIEPH | swisseph.SEFLG_SPEED);
-
-    if ("error" in result) {
-        throw new Error(result.error);
-    }
-
-    if (!("longitude" in result) || !("longitudeSpeed" in result)) {
-        throw new Error("Invalid result from swe_calc_ut");
-    }
-
-    const signIndex = Math.floor(result.longitude / 30);
-
-    return {
-        sign: SINGS_MAP[signIndex],
-        signIndex,
-        longitude: result.longitude,
-        speed: result.longitudeSpeed,
-        retrograde: result.longitudeSpeed < 0,
-    };
-}
 
 function computeAspects(planets: Partial<Record<TransitAspectsPlanet, { longitude: number }>>): TransitAspects {
     const entries = Object.entries(planets);
@@ -76,21 +41,9 @@ function computeAspects(planets: Partial<Record<TransitAspectsPlanet, { longitud
     return aspects;
 }
 
-export function computePlanetPositions(date: Date) {
-    const jd = getJulianDate(date);
-
-    return {
-        sun: getPlanetPosition(jd, swisseph.SE_SUN),
-        moon: getPlanetPosition(jd, swisseph.SE_MOON),
-        mercury: getPlanetPosition(jd, swisseph.SE_MERCURY),
-        venus: getPlanetPosition(jd, swisseph.SE_VENUS),
-        mars: getPlanetPosition(jd, swisseph.SE_MARS),
-        jupiter: getPlanetPosition(jd, swisseph.SE_JUPITER),
-        saturn: getPlanetPosition(jd, swisseph.SE_SATURN),
-        uranus: getPlanetPosition(jd, swisseph.SE_URANUS),
-        neptune: getPlanetPosition(jd, swisseph.SE_NEPTUNE),
-        pluto: getPlanetPosition(jd, swisseph.SE_PLUTO),
-    };
+/** Single ephemeris implementation lives in modules/astro. */
+export function computePlanetPositions(date: Date): TransitPlanets {
+    return computeTransitChart(date) as TransitPlanets;
 }
 
 export function computeTransits(date: Date): {
@@ -112,7 +65,9 @@ export function computeTransits(date: Date): {
 export async function executeTransitsGeneration(db: FastifyInstance["db"]) {
     console.log("[CRON] Generating transits...");
 
-    for (let i = 0; i < 7; i++) {
+    // -7 as well as +7: the sign-in backfill scores a two-week window around today,
+    // and computing transits is pure CPU, so covering the past costs nothing.
+    for (let i = -7; i <= 7; i++) {
         const date = dayjs.utc().startOf("day").add(i, "day").toDate();
 
         const data = computeTransits(date);

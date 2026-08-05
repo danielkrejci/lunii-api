@@ -139,12 +139,15 @@ export default (async (fastify) => {
 
                     const overallScore = normalizeScore(overallRaw, OVERALL_NORMALIZER);
 
-                    await fastify.db.insert(compatibilityPeopleScores).values({
-                        personId: person.id,
-                        date,
-                        score: overallScore,
-                        compatibility: dailyCompatibility,
-                    });
+                    await fastify.db
+                        .insert(compatibilityPeopleScores)
+                        .values({
+                            personId: person.id,
+                            date,
+                            score: overallScore,
+                            compatibility: dailyCompatibility,
+                        })
+                        .onConflictDoNothing();
 
                     person.date = date;
                     person.score = overallScore;

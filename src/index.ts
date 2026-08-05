@@ -27,6 +27,7 @@ import {
 } from "fastify-type-provider-zod";
 
 import { MAX_IMAGE_SIZE } from "./lib/r2";
+import { createDailyScoresJob, executeDailyScoresGeneration } from "./modules/dailyScore/service";
 import { createTransitJob, executeTransitsGeneration } from "./modules/transits";
 
 dayjs.extend(utc);
@@ -96,6 +97,7 @@ fastify.setErrorHandler((error, request, reply) => {
     if (hasZodFastifySchemaValidationErrors(error)) {
         return reply.status(400).send({
             error: {
+                code: "validation_error",
                 message: error.validation[0].message,
             },
         });
@@ -108,6 +110,7 @@ fastify.setErrorHandler((error, request, reply) => {
         );
         return reply.status(500).send({
             error: {
+                code: "internal_server_error",
                 message: "Internal Server Error",
             },
         });
@@ -152,11 +155,13 @@ fastify.ready(async (err) => {
     // create transit job
     const job = createTransitJob(fastify.db);
 
-    // add cron job
+    // add cron jobs
     fastify.scheduler.addCronJob(job);
+    fastify.scheduler.addCronJob(createDailyScoresJob(fastify.db));
 
-    // immediate run
+    // immediate run: transits first, then tomorrow's scores for everyone
     await executeTransitsGeneration(fastify.db);
+    await executeDailyScoresGeneration(fastify.db);
 
     // print available routes
     console.log(fastify.printRoutes());

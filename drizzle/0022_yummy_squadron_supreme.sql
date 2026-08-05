@@ -1,0 +1,1 @@
+ALTER TABLE "profile" ALTER COLUMN "rising_sign" DROP NOT NULL;

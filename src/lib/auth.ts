@@ -9,6 +9,7 @@ import { db } from "../db";
 import * as schema from "../db/schema";
 import { account, profile } from "../db/schema";
 import { env } from "../env";
+import { backfillScoresForUser } from "../modules/dailyScore/service";
 import { serializeDrizzleData } from "../utils/drizzleUtils";
 
 export async function generateAppleClientSecret() {
@@ -48,15 +49,6 @@ const config = {
     plugins: [
         expo(),
         anonymous(),
-        // anonymous({
-        //     onLinkAccount: async ({ anonymousUser, newUser }) => {
-        //         // Deliberately not caught: the plugin deletes the anonymous user
-        //         // right after this resolves, and every user_id FK cascades. If the
-        //         // merge fails we want the whole callback to fail rather than let
-        //         // the user's data be silently deleted.
-        //         await linkAnonymousAccount(anonymousUser.user.id, newUser.user.id);
-        //     },
-        // }),
         customSession(async ({ user: sessionUser, session }) => {
             try {
                 const profileData = await db
@@ -136,8 +128,41 @@ const config = {
             maxAge: 60 * 5,
         },
     },
-    logger: {
-        level: "debug",
+    databaseHooks: {
+        session: {
+            create: {
+                /**
+                 * Fill the user's score window on sign-in. Scores only — no AI — so this
+                 * is pure CPU over ~15 days and costs nothing per login.
+                 *
+                 * Fire and forget on purpose: a backfill failure must never block or fail
+                 * a sign-in.
+                 */
+                after: async (session) => {
+                    const [userProfile] = await db
+                        .select({ birthChart: profile.birthChart, birthTime: profile.birthTime })
+                        .from(profile)
+                        .where(eq(profile.userId, session.userId))
+                        .limit(1);
+
+                    // No profile yet means onboarding is unfinished; nothing to score against.
+                    if (!userProfile) {
+                        return;
+                    }
+
+                    void backfillScoresForUser(db, {
+                        userId: session.userId,
+                        profile: userProfile,
+                    }).catch((error) => {
+                        console.error("backfillScoresForUser failed", error);
+                    });
+                },
+            },
+        },
+    },
+    rateLimit: {
+        window: 10,
+        max: 100,
     },
 } satisfies BetterAuthOptions;
 

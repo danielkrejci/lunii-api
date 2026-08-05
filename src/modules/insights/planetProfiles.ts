@@ -11,13 +11,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
 
         themes: ["identity", "confidence", "visibility", "self_expression", "recognition", "motivation"],
 
-        lifeAreas: {
-            career: 0.9,
-            mood: 0.8,
-            health: 0.7,
-            love: 0.6,
-        },
-
         energy: {
             activity: 80,
             emotion: 40,
@@ -76,13 +69,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "emotional_need",
         ],
 
-        lifeAreas: {
-            mood: 1,
-            love: 0.8,
-            health: 0.6,
-            career: 0.3,
-        },
-
         energy: {
             activity: 30,
             emotion: 100,
@@ -138,13 +124,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "misunderstanding",
         ],
 
-        lifeAreas: {
-            career: 0.8,
-            mood: 0.6,
-            love: 0.5,
-            health: 0.4,
-        },
-
         energy: {
             activity: 60,
             emotion: 30,
@@ -189,13 +168,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "Represents love, harmony, attraction, beauty and the ability to build meaningful relationships. Venus governs appreciation, pleasure and emotional connection.",
 
         themes: ["love", "connection", "attraction", "warmth", "romance", "beauty", "affection", "social_ease"],
-
-        lifeAreas: {
-            love: 1,
-            mood: 0.8,
-            career: 0.4,
-            health: 0.3,
-        },
 
         energy: {
             activity: 35,
@@ -255,13 +227,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "conflict",
             "impatience",
         ],
-
-        lifeAreas: {
-            career: 1,
-            health: 0.8,
-            mood: 0.6,
-            love: 0.5,
-        },
 
         energy: {
             activity: 100,
@@ -349,13 +314,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "Represents expansion, wisdom, optimism and the pursuit of meaning. Jupiter encourages personal growth, broadens perspective and inspires confidence in future possibilities. It highlights where opportunities arise through learning, exploration and trust.",
 
         themes: ["optimism", "growth", "possibility", "exploration", "freedom", "hope", "openness"],
-
-        lifeAreas: {
-            career: 0.8,
-            love: 0.6,
-            mood: 0.9,
-            health: 0.6,
-        },
 
         energy: {
             activity: 70,
@@ -452,13 +410,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "stability",
         ],
 
-        lifeAreas: {
-            career: 1,
-            health: 0.7,
-            mood: 0.4,
-            love: 0.4,
-        },
-
         energy: {
             activity: 45,
             emotion: 30,
@@ -543,13 +494,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "Represents innovation, change, freedom and awakening. Uranus disrupts established patterns, encourages independent thinking and inspires breakthroughs that lead to personal evolution. It reveals where liberation comes through embracing the unexpected.",
 
         themes: ["change", "surprise", "rebellion", "instability", "breakthrough", "independence", "unpredictability"],
-
-        lifeAreas: {
-            career: 0.5,
-            mood: 0.8,
-            love: 0.3,
-            health: 0.3,
-        },
 
         energy: {
             activity: 80,
@@ -645,13 +589,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "blurred_boundaries",
         ],
 
-        lifeAreas: {
-            mood: 1,
-            love: 0.7,
-            health: 0.4,
-            career: 0.3,
-        },
-
         energy: {
             activity: 20,
             emotion: 85,
@@ -744,13 +681,6 @@ export const PLANET_PROFILES: Record<Planet, AstrologicalProfile> = {
             "inner_shift",
             "hidden_tension",
         ],
-
-        lifeAreas: {
-            mood: 0.9,
-            career: 0.4,
-            love: 0.7,
-            health: 0.4,
-        },
 
         energy: {
             activity: 50,

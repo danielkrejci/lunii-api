@@ -15,6 +15,8 @@
         "depcheck": "depcheck",
         "db:generate": "npx drizzle-kit generate",
         "db:migrate": "npx drizzle-kit migrate",
+        "test": "tsx --test src/modules/*/*.test.ts",
+        "test:watch": "tsx --test --watch src/modules/*/*.test.ts",
         "lint": "oxlint .",
         "lint:fix": "oxlint . --fix",
         "format": "oxfmt",

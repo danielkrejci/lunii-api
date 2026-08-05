@@ -12,12 +12,10 @@ import weekOfYear from "dayjs/plugin/weekOfYear";
 
 import { db } from "../db";
 import { compatibilityPeople } from "../db/schema";
-import swisseph from "../lib/swisseph";
+import { computeNatalChart } from "../modules/astro";
 import { calculateCompatibility } from "../modules/compatibilityPeople/aspects";
 import { BASE_NORMALIZER, normalizeScore } from "../modules/compatibilityPeople/normalizer";
-import { NatalChart } from "../modules/compatibilityPeople/types";
-import { getPlanetPosition } from "../modules/transits";
-import { Gender, Relationship, SINGS_MAP } from "../utils/natalUtils";
+import { Gender, Relationship } from "../utils/natalUtils";
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
@@ -161,35 +159,15 @@ async function createPerson(userId: string) {
     const birthDate = dayjs(randomDate());
     const birthTime = dayjs(birthDate);
 
-    const absoluteBirthDate = dayjs
-        .tz(birthDate.format("YYYY-MM-DD"), city.timezone)
-        .hour(birthTime.hour())
-        .minute(birthTime.minute())
-        .second(0)
-        .millisecond(0)
-        .toDate();
+    const { chart: birthChart } = computeNatalChart({
+        birthDate: birthDate.format("YYYY-MM-DD"),
+        birthTime: birthTime.format("HH:mm"),
+        birthPlaceLat: city.lat,
+        birthPlaceLng: city.lng,
+        timezone: city.timezone,
+    });
 
-    const jd = swisseph.swe_julday(
-        absoluteBirthDate.getUTCFullYear(),
-        absoluteBirthDate.getUTCMonth() + 1,
-        absoluteBirthDate.getUTCDate(),
-        absoluteBirthDate.getUTCHours() + absoluteBirthDate.getUTCMinutes() / 60,
-        swisseph.SE_GREG_CAL
-    );
-
-    const birthChart: NatalChart = {
-        sun: getPlanetPosition(jd, swisseph.SE_SUN),
-        moon: getPlanetPosition(jd, swisseph.SE_MOON),
-        mercury: getPlanetPosition(jd, swisseph.SE_MERCURY),
-        venus: getPlanetPosition(jd, swisseph.SE_VENUS),
-        mars: getPlanetPosition(jd, swisseph.SE_MARS),
-        jupiter: getPlanetPosition(jd, swisseph.SE_JUPITER),
-        saturn: getPlanetPosition(jd, swisseph.SE_SATURN),
-    };
-
-    const houses = swisseph.swe_houses(jd, city.lat, city.lng, "P");
-
-    const risingSign = houses && "ascendant" in houses ? SINGS_MAP[Math.floor(houses.ascendant / 30)] : null;
+    const risingSign = birthChart.ascendant?.sign ?? null;
 
     const baseCompatibility = calculateCompatibility(BIRTH_CHART as any, birthChart);
 

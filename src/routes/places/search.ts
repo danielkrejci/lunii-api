@@ -1,12 +1,38 @@
+import rateLimit from "@fastify/rate-limit";
 import placekit from "@placekit/client-js";
+import { fromNodeHeaders } from "better-auth/node";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
 import { env } from "../../env";
+import { auth } from "../../lib/auth";
 import { serializeDrizzleData } from "../../utils/drizzleUtils";
 
 export default (async (fastify) => {
+    await fastify.register(rateLimit, {
+        max: 100,
+        timeWindow: "1 day",
+        keyGenerator: async (request) => {
+            const session = await auth.api.getSession({
+                headers: fromNodeHeaders(request.headers),
+            });
+            return session?.user?.id ?? request.ip;
+        },
+        errorResponseBuilder: (_request, context) => {
+            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
+            return {
+                statusCode: 429,
+                error: {
+                    hours: Math.floor(totalSeconds / 3600),
+                    minutes: Math.floor((totalSeconds % 3600) / 60),
+                    message: "You've reached the limit for now. Please try again later.",
+                    silent: true,
+                },
+            };
+        },
+    });
+
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/search",
         {

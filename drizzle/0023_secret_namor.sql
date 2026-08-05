@@ -1,0 +1,1 @@
+ALTER TABLE "daily_insights" ADD COLUMN "planets" jsonb;

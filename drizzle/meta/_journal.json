@@ -134,6 +134,41 @@
       "when": 1785703968760,
       "tag": "0018_harsh_carmella_unuscione",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1785858213127,
+      "tag": "0019_steady_wind_dancer",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1785864352954,
+      "tag": "0020_thin_winter_soldier",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1785877149359,
+      "tag": "0021_married_ikaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1785877284907,
+      "tag": "0022_yummy_squadron_supreme",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1785941347216,
+      "tag": "0023_secret_namor",
+      "breakpoints": true
     }
   ]
 }

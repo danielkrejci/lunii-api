@@ -1,3 +1,5 @@
+import rateLimit from "@fastify/rate-limit";
+import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
@@ -7,6 +9,7 @@ import { find as geoTz } from "geo-tz";
 import { z } from "zod";
 
 import { ai } from "../../lib/ai";
+import { auth } from "../../lib/auth";
 import swisseph from "../../lib/swisseph";
 import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageUtils";
 import { Gender, Genders, SINGS_MAP } from "../../utils/natalUtils";
@@ -17,6 +20,29 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 export default (async (fastify) => {
+    await fastify.register(rateLimit, {
+        max: 5,
+        timeWindow: "1 day",
+        keyGenerator: async (request) => {
+            const session = await auth.api.getSession({
+                headers: fromNodeHeaders(request.headers),
+            });
+            return session?.user?.id ?? request.ip;
+        },
+        errorResponseBuilder: (_request, context) => {
+            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
+            return {
+                statusCode: 429,
+                error: {
+                    hours: Math.floor(totalSeconds / 3600),
+                    minutes: Math.floor((totalSeconds % 3600) / 60),
+                    message: "You've reached the limit for now. Please try again later.",
+                    silent: true,
+                },
+            };
+        },
+    });
+
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/generate",
         {
@@ -66,7 +92,7 @@ export default (async (fastify) => {
                         data: z.object({
                             sunSign: z.string(),
                             moonSign: z.string(),
-                            risingSign: z.string(),
+                            risingSign: z.string().nullable(),
                             personalityProfile: z.string(),
                             personalityProfileInput: z.string(),
                         }),
@@ -156,7 +182,13 @@ export default (async (fastify) => {
                 });
             }
 
-            const risingSign = SINGS_MAP[Math.floor(houses.ascendant / 30)];
+            /**
+             * Null without a birth time. The Ascendant moves a full sign roughly every
+             * two hours, so deriving it from an assumed noon returns an essentially
+             * random sign — null is the honest answer, and the scoring engine skips the
+             * Ascendant rather than trusting a fabricated one.
+             */
+            const risingSign = request.body.birthTime ? SINGS_MAP[Math.floor(houses.ascendant / 30)] : null;
 
             const language = getLanguageByIso(request.body.language);
 
@@ -205,7 +237,7 @@ export default (async (fastify) => {
                     User data:
                     - Sun sign: ${request.body.sunSign}
                     - Moon sign: ${moonSign}
-                    - Rising sign: ${risingSign}
+                    - Rising sign: ${risingSign ?? "unknown — no birth time was given, so do not describe outer expression as if it were established"}
                     - Relationship: ${request.body.relationshipStatus}
                     - Current career state: ${request.body.careerStage}
                     - Decision style: ${request.body.decisionStyle}

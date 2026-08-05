@@ -13,9 +13,11 @@ import {
     uniqueIndex,
 } from "drizzle-orm/pg-core";
 
+import { NatalChart } from "../modules/astro";
 import { DailyOverviewResponse } from "../modules/compatibilityPeople/ai";
-import { CompatibilityResult, DailyCompatibilityResult, NatalChart } from "../modules/compatibilityPeople/types";
-import { DailyInsight } from "../modules/insights";
+import { CompatibilityResult, DailyCompatibilityResult } from "../modules/compatibilityPeople/types";
+import { RawScores, ScoreBreakdown } from "../modules/dailyScore/types";
+import { DailyInsight, DailyPlanetInsight } from "../modules/insights";
 import { Gender, Relationship, TransitAspects, TransitPlanets, ZodiacSign } from "../utils/natalUtils";
 
 export const compatibilityPeopleScores = pgTable(
@@ -25,7 +27,7 @@ export const compatibilityPeopleScores = pgTable(
         personId: text("person_id")
             .notNull()
             .references(() => compatibilityPeople.id, { onDelete: "cascade" }),
-        score: numeric("score").$type<number>().notNull(),
+        score: numeric("score", { mode: "number" }).notNull(),
         compatibility: jsonb("compatibility").$type<DailyCompatibilityResult>().notNull(),
         overview: text("overview"),
         positiveOverview: jsonb("positive_overview").$type<DailyOverviewResponse["positiveOverview"]>(),
@@ -66,7 +68,7 @@ export const compatibilityPeople = pgTable(
         moonSign: text("moon_sign").$type<ZodiacSign>(),
         risingSign: text("rising_sign").$type<ZodiacSign>(),
         birthChart: jsonb("birth_chart").$type<NatalChart>().notNull(),
-        baseScore: numeric("base_score").$type<number>().notNull(),
+        baseScore: numeric("base_score", { mode: "number" }).notNull(),
         baseCompatibility: jsonb("base_compatibility").$type<CompatibilityResult>().notNull(),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
@@ -77,41 +79,6 @@ export const compatibilityPeople = pgTable(
     (table) => [index("compatibility_people_user_id_idx").on(table.userId)]
 );
 
-// overview: {
-//             title: string;
-//             description: string;
-//         };
-//         moon: {
-//             phase: string;
-//             insight: string;
-//             reason: string;
-//         };
-//         insights: {
-//             love: {
-//                 score: number;
-//                 insight: string;
-//                 reason: string;
-//             };
-//             career: {
-//                 score: number;
-//                 insight: string;
-//                 reason: string;
-//             };
-//             health: {
-//                 score: number;
-//                 insight: string;
-//                 reason: string;
-//             };
-//             mood: {
-//                 score: number;
-//                 insight: string;
-//                 reason: string;
-//             };
-//         };
-//         opportunity: string;
-//         watchOut: string;
-//         deepInsight: string;
-
 export const dailyInsights = pgTable(
     "daily_insights",
     {
@@ -119,21 +86,45 @@ export const dailyInsights = pgTable(
             .notNull()
             .references(() => user.id, { onDelete: "cascade" }),
         date: date("date", { mode: "string" }).notNull(),
-        overview: jsonb("overview").$type<DailyInsight["overview"]>().notNull(),
-        moon: jsonb("moon").$type<DailyInsight["moon"]>().notNull(),
-        loveScore: numeric("love_score").$type<number>().notNull(),
-        loveInsight: jsonb("love_insight").$type<DailyInsight["insights"]["love"]>().notNull(),
-        careerScore: numeric("career_score").$type<number>().notNull(),
-        careerInsight: jsonb("career_insight").$type<DailyInsight["insights"]["career"]>().notNull(),
-        healthScore: numeric("health_score").$type<number>().notNull(),
-        healthInsight: jsonb("health_insight").$type<DailyInsight["insights"]["health"]>().notNull(),
-        moodScore: numeric("mood_score").$type<number>().notNull(),
-        moodInsight: jsonb("mood_insight").$type<DailyInsight["insights"]["mood"]>().notNull(),
-        opportunity: jsonb("opportunity").$type<DailyInsight["opportunity"]>().notNull(),
-        watchOut: jsonb("watch_out").$type<DailyInsight["watchOut"]>().notNull(),
-        deepInsight: text("deep_insight").notNull(),
-        rawResponse: text("raw_response").notNull(),
-        rawInput: text("raw_input").notNull().default(""),
+        overview: jsonb("overview").$type<DailyInsight["overview"]>(),
+        moon: jsonb("moon").$type<DailyInsight["moon"]>(),
+        loveScore: numeric("love_score", { mode: "number" }).notNull(),
+        loveInsight: jsonb("love_insight").$type<DailyInsight["insights"]["love"]>(),
+        careerScore: numeric("career_score", { mode: "number" }).notNull(),
+        careerInsight: jsonb("career_insight").$type<DailyInsight["insights"]["career"]>(),
+        healthScore: numeric("health_score", { mode: "number" }).notNull(),
+        healthInsight: jsonb("health_insight").$type<DailyInsight["insights"]["health"]>(),
+        moodScore: numeric("mood_score", { mode: "number" }).notNull(),
+        moodInsight: jsonb("mood_insight").$type<DailyInsight["insights"]["mood"]>(),
+        overallScore: numeric("overall_score", { mode: "number" }).notNull(),
+        overallInsight: jsonb("overall_insight").$type<DailyInsight["insights"]["overall"]>(),
+        opportunity: jsonb("opportunity").$type<DailyInsight["opportunity"]>(),
+        watchOut: jsonb("watch_out").$type<DailyInsight["watchOut"]>(),
+        deepInsight: text("deep_insight"),
+        /**
+         * Per-body weight with the AI's interpretation. Stored rather than recomputed
+         * because the text is part of it, and regenerating text is neither free nor
+         * deterministic.
+         */
+        planets: jsonb("planets").$type<DailyPlanetInsight[]>(),
+        /**
+         * Pre-squash sums. Without these a score cannot be explained later: the
+         * 0-100 value alone says nothing about how it got there.
+         */
+        rawScores: jsonb("raw_scores").$type<RawScores>(),
+        /** 0-1. How much aspect weight the chart produced. Metadata — never part of the score. */
+        confidence: numeric("confidence", { mode: "number" }),
+        /** Strongest contributions per area plus the narrative top list, for debugging and the prompt. */
+        scoreBreakdown: jsonb("score_breakdown").$type<ScoreBreakdown>(),
+        /**
+         * Which engine produced this row. Recomputing an old row after rules.ts moved
+         * on legitimately gives a different number; without this there is no way to
+         * tell that apart from a bug.
+         */
+        engineVersion: text("engine_version"),
+        calibrationVersion: text("calibration_version"),
+        rawResponse: text("raw_response"),
+        rawInput: text("raw_input"),
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at")
             .defaultNow()
@@ -170,7 +161,8 @@ export const profile = pgTable(
         gender: text("gender").$type<Gender>().notNull(),
         sunSign: text("sun_sign").$type<ZodiacSign>().notNull(),
         moonSign: text("moon_sign").$type<ZodiacSign>().notNull(),
-        risingSign: text("rising_sign").$type<ZodiacSign>().notNull(),
+        // Nullable: an Ascendant without a birth time would be a fabrication.
+        risingSign: text("rising_sign").$type<ZodiacSign>(),
         relationshipStatus: text("relationship_status").notNull(),
         careerStage: text("career_stage").notNull(),
         decisionStyle: text("decision_style").notNull(),
@@ -179,7 +171,7 @@ export const profile = pgTable(
         contentPreference: text("content_preference").notNull(),
         beliefLevel: text("belief_level").notNull(),
         personalityProfile: text("personality_profile").notNull(),
-        personalityProfileInput: text("personality_profile_input").notNull().default(""),
+        personalityProfileInput: text("personality_profile_input").notNull(),
         timezone: text("timezone").notNull(),
         notificationToken: text("notification_token"),
         country: text("country").notNull(),
