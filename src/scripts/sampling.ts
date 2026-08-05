@@ -139,7 +139,7 @@ export function describe(values: number[]): string {
     return (
         `mean ${mean(values).toFixed(1)}  p10 ${percentile(sorted, 0.1).toFixed(1)}  ` +
         `p50 ${percentile(sorted, 0.5).toFixed(1)}  p90 ${percentile(sorted, 0.9).toFixed(1)}  ` +
-        `min ${sorted[0].toFixed(1)}  max ${sorted.at(-1).toFixed(1)}`
+        `min ${sorted[0].toFixed(1)}  max ${(sorted.at(-1) ?? 0).toFixed(1)}`
     );
 }
 

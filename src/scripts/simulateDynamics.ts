@@ -230,7 +230,7 @@ console.log(
     `\nsame-day spread across the four areas: median ${percentile(sortedSpreads, 0.5).toFixed(0)}` +
         `  p90 ${percentile(sortedSpreads, 0.9).toFixed(0)}` +
         `  p99 ${percentile(sortedSpreads, 0.99).toFixed(0)}` +
-        `  max ${sortedSpreads.at(-1).toFixed(0)}`
+        `  max ${(sortedSpreads.at(-1) ?? 0).toFixed(0)}`
 );
 console.log(
     `  share of days with a spread of 40+: ${((spreads.filter((s) => s >= 40).length / spreads.length) * 100).toFixed(1)}%`

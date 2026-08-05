@@ -170,7 +170,7 @@ const sortedSpreads = [...spreads].sort((a, b) => a - b);
 
 console.log(
     `\n  spread between the four areas on the same day: median ${percentile(sortedSpreads, 0.5).toFixed(1)}` +
-        `  p90 ${percentile(sortedSpreads, 0.9).toFixed(1)}  max ${sortedSpreads.at(-1).toFixed(0)}`
+        `  p90 ${percentile(sortedSpreads, 0.9).toFixed(1)}  max ${(sortedSpreads.at(-1) ?? 0).toFixed(0)}`
 );
 console.log("  a day like 'love 90 / career 20' needs a spread of 70");
 
