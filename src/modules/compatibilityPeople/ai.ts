@@ -1,30 +1,41 @@
+import { z } from "zod";
+
 import { ai } from "../../lib/ai";
 import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageUtils";
 import { Gender, Relationship, ZodiacSign } from "../../utils/natalUtils";
 import { parseLLMJson } from "../../utils/stringUtils";
-import { Category, RelationshipCategory } from "./types";
+import { toResponseJsonSchema } from "../../utils/zodResponse";
+import { Category, INSIGHT_DIRECTIONS, RELATIONSHIP_CATEGORIES } from "./types";
 
-export interface DailyOverviewResponse {
-    overview: string;
-    positiveOverview: {
-        title: string;
-        description: string;
-        reason: string;
-    };
-    negativeOverview: {
-        title: string;
-        description: string;
-        reason: string;
-    };
-    insights: {
-        title: string;
-        description: string;
-        reason: string;
-        category: RelationshipCategory;
-        direction: "positive" | "neutral" | "negative";
-    }[];
-    practicalAdvice: string;
-}
+const overviewBlockSchema = z.object({
+    title: z.string(),
+    description: z.string(),
+    reason: z.string(),
+});
+
+/**
+ * Handed to the model as its response schema, so the decoder cannot emit anything that
+ * does not fit — a single missing brace in one array element used to throw the whole
+ * answer away. It is also the one definition of the shape: the type is derived from it
+ * and the answer is validated against it on the way back.
+ */
+export const dailyOverviewSchema = z.object({
+    overview: z.string(),
+    positiveOverview: overviewBlockSchema,
+    negativeOverview: overviewBlockSchema,
+    insights: z.array(
+        z.object({
+            title: z.string(),
+            description: z.string(),
+            reason: z.string(),
+            category: z.enum(RELATIONSHIP_CATEGORIES),
+            direction: z.enum(INSIGHT_DIRECTIONS),
+        })
+    ),
+    practicalAdvice: z.string(),
+});
+
+export type DailyOverviewResponse = z.infer<typeof dailyOverviewSchema>;
 
 // export type DailyOverviewResponse = {
 //     overview: string;
@@ -578,33 +589,95 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
         `;
 }
 
-export async function generateDailyOverview(languageIso: string, input: DailyCompatibilityAiInput) {
+const MODEL = "gemini-2.5-flash";
+
+/** List price per million tokens, so the logged cost is what was actually charged. */
+const PRICE_PER_MILLION = { input: 0.3, output: 2.5 };
+
+/**
+ * Never throws on a bad answer: the caller logs every call, successful or not, so a
+ * parse failure has to come back with its metrics attached.
+ */
+export async function generateDailyOverview(
+    languageIso: string,
+    input: DailyCompatibilityAiInput
+): Promise<{
+    content: DailyOverviewResponse | null;
+    usage: {
+        requestId: string;
+        provider: string;
+        model: string;
+        input: string;
+        output: string;
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens: number;
+        latencyMs: number;
+        cost: number;
+        error: string | null;
+    };
+}> {
     const language = getLanguageByIso(languageIso);
 
     const prompt = buildPrompt(language ? buildPromptLanguageRule(language) : languageIso, input);
 
+    const startedAt = Date.now();
+
     const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: MODEL,
         contents: prompt,
         config: {
             temperature: 0.5,
             responseMimeType: "application/json",
+            responseJsonSchema: toResponseJsonSchema(dailyOverviewSchema),
         },
     });
 
     const text = response.text ?? "";
 
-    // console.log(JSON.stringify(input, null, 2));
-    // console.log(text);
+    const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
+    const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
 
-    const result = parseLLMJson<DailyOverviewResponse>(text);
+    const usage = {
+        requestId: response.responseId ?? "",
+        provider: "google",
+        model: MODEL,
+        input: prompt,
+        output: text,
+        inputTokens,
+        outputTokens,
+        totalTokens: response.usageMetadata?.totalTokenCount ?? inputTokens + outputTokens,
+        latencyMs: Date.now() - startedAt,
+        cost:
+            (inputTokens / 1_000_000) * PRICE_PER_MILLION.input + (outputTokens / 1_000_000) * PRICE_PER_MILLION.output,
+        error: null as string | null,
+    };
 
-    if (!result) {
-        throw new Error("Failed to parse horoscope response");
+    const raw = parseLLMJson<unknown>(text);
+    const parsed = raw === null ? null : dailyOverviewSchema.safeParse(raw);
+
+    if (!parsed?.success) {
+        /**
+         * `finishReason` alone does not explain a rejected answer — `STOP` means the
+         * model finished cleanly and the fault is on this side of the wire. Say which of
+         * the three it was, or the next failure costs another read of the raw output.
+         */
+        const issue = parsed?.error.issues[0];
+
+        const reason = text.trim()
+            ? issue
+                ? `answer does not match the schema at "${issue.path.join(".")}": ${issue.message}`
+                : "answer could not be parsed as JSON"
+            : "model returned no text";
+
+        return {
+            content: null,
+            usage: {
+                ...usage,
+                error: `${reason} (finishReason: ${response.candidates?.[0]?.finishReason ?? "unknown"}, ${text.length} chars)`,
+            },
+        };
     }
 
-    return {
-        response: result,
-        input: prompt,
-    };
+    return { content: parsed.data, usage };
 }

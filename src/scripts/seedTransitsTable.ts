@@ -18,9 +18,10 @@ async function main() {
     console.log("Seeding transits table...");
 
     for (let i = 0; i < DAYS; i++) {
-        const date = START_DATE.startOf("day").add(i, "day").toDate();
+        const date = START_DATE.startOf("day").add(i, "day").format("YYYY-MM-DD");
 
-        const data = computeTransits(date);
+        // Seeds UTC only; other zones are created lazily on the read path.
+        const data = computeTransits(date, 0);
 
         await db
             .insert(transit)

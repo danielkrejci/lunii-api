@@ -2,15 +2,13 @@ import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
-import { eq } from "drizzle-orm";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { transit } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { calculateDailyCompatibility } from "../../../modules/compatibilityZodiac/scoring";
-import { takeUniqueOrThrow } from "../../../utils/drizzleUtils";
+import { getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { SINGS_MAP } from "../../../utils/natalUtils";
 
 dayjs.extend(utc);
@@ -86,20 +84,7 @@ export default (async (fastify) => {
             }
 
             try {
-                const transits = await fastify.db
-                    .select()
-                    .from(transit)
-                    .where(eq(transit.date, request.query.date))
-                    .then(takeUniqueOrThrow);
-
-                if (!transits) {
-                    return reply.status(409).send({
-                        error: {
-                            code: "transit_not_found",
-                            message: "No transits found for this date",
-                        },
-                    });
-                }
+                const transits = await getOrCreateTransits(fastify.db, request.query.date, session.profile.timezone);
 
                 const result = SINGS_MAP.map((sign) => {
                     const compatibility = calculateDailyCompatibility(sign, session.profile.sunSign, transits.planets);

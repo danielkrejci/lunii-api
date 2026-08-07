@@ -1,17 +1,15 @@
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { FastifyInstance } from "fastify";
 import { AsyncTask, CronJob } from "toad-scheduler";
 
 import { calculateDailyScore } from ".";
-import { dailyInsights, profile as profileTable, transit } from "../../db/schema";
+import { compatibilityPeopleScores, dailyInsights, profile as profileTable, transit } from "../../db/schema";
 import { TransitAspects } from "../../utils/natalUtils";
-import { NatalChart, transitInstantForDate, TransitChart } from "../astro";
-import { computeTransits } from "../transits";
-import { CALIBRATION_VERSION } from "./calibration";
+import { NatalChart, TransitChart } from "../astro";
+import { computeTransits, utcOffsetForDate } from "../transits";
 import { DailyScoreResult } from "./types";
-import { ENGINE_VERSION } from "./version";
 
 dayjs.extend(utc);
 
@@ -21,6 +19,8 @@ type Db = FastifyInstance["db"];
 export interface ScoringProfile {
     birthChart: NatalChart;
     birthTime: string | null;
+    /** Where the user is now, which decides what span of time their date covers. */
+    timezone: string | null;
 }
 
 /** A stored score row, with numerics already turned back into numbers. */
@@ -31,7 +31,6 @@ export interface StoredScore {
     healthScore: number;
     moodScore: number;
     overallScore: number;
-    confidence: number | null;
 }
 
 /* ============================================================
@@ -45,15 +44,23 @@ export interface StoredScore {
  */
 export async function getOrCreateTransits(
     db: Db,
-    date: string
+    date: string,
+    timezone: string | null
 ): Promise<{ planets: TransitChart; aspects: TransitAspects }> {
-    const rows = await db.select().from(transit).where(eq(transit.date, date));
+    // A date is a different span of time in every zone, so the positions are sampled at
+    // local noon and stored per offset.
+    const utcOffset = utcOffsetForDate(date, timezone);
+
+    const rows = await db
+        .select()
+        .from(transit)
+        .where(and(eq(transit.date, date), eq(transit.utcOffset, utcOffset)));
 
     if (rows.length > 0) {
         return { planets: rows[0].planets as TransitChart, aspects: rows[0].aspects };
     }
 
-    const computed = computeTransits(transitInstantForDate(date));
+    const computed = computeTransits(date, utcOffset);
 
     await db.insert(transit).values(computed).onConflictDoNothing();
 
@@ -82,11 +89,6 @@ function toRow(userId: string, date: string, result: DailyScoreResult) {
         healthScore: result.scores.healthScore,
         moodScore: result.scores.moodScore,
         overallScore: result.scores.overallScore,
-        rawScores: result.raw,
-        confidence: result.confidence,
-        scoreBreakdown: result.breakdown,
-        engineVersion: ENGINE_VERSION,
-        calibrationVersion: CALIBRATION_VERSION,
     };
 }
 
@@ -110,16 +112,15 @@ export async function getDailyScore(
 
         return {
             date: row.date,
-            loveScore: Number(row.loveScore),
-            careerScore: Number(row.careerScore),
-            healthScore: Number(row.healthScore),
-            moodScore: Number(row.moodScore),
-            overallScore: Number(row.overallScore),
-            confidence: row.confidence === null ? null : Number(row.confidence),
+            loveScore: row.loveScore,
+            careerScore: row.careerScore,
+            healthScore: row.healthScore,
+            moodScore: row.moodScore,
+            overallScore: row.overallScore,
         };
     }
 
-    const { planets } = await getOrCreateTransits(db, input.date);
+    const { planets } = await getOrCreateTransits(db, input.date, input.profile.timezone);
     const result = scoreProfileForDate(input.profile, planets);
 
     await db
@@ -134,7 +135,6 @@ export async function getDailyScore(
         healthScore: result.scores.healthScore,
         moodScore: result.scores.moodScore,
         overallScore: result.scores.overallScore,
-        confidence: result.confidence,
     };
 }
 
@@ -142,25 +142,33 @@ export async function getDailyScore(
    BACKFILL
 ============================================================ */
 
-export function datesAround(daysBack: number, daysForward: number): string[] {
+export function datesAround(daysBack: number, daysForward: number, anchor?: string): string[] {
     const dates: string[] = [];
+    const start = anchor ? dayjs.utc(anchor) : dayjs.utc();
 
     for (let offset = -daysBack; offset <= daysForward; offset++) {
-        dates.push(dayjs.utc().startOf("day").add(offset, "day").format("YYYY-MM-DD"));
+        dates.push(start.startOf("day").add(offset, "day").format("YYYY-MM-DD"));
     }
 
     return dates;
 }
 
 /**
- * Scores only — no AI. Runs on sign-in so the app has a filled window immediately;
- * the insight text is generated lazily when a day is actually opened.
+ * Scores only — no AI. Called from the read path, which is what keeps the timeline
+ * window whole; the insight text is generated lazily when a day is actually opened.
  */
 export async function backfillScoresForUser(
     db: Db,
-    input: { userId: string; profile: ScoringProfile; daysBack?: number; daysForward?: number }
+    input: {
+        userId: string;
+        profile: ScoringProfile;
+        /** Centre of the window. Defaults to today. */
+        date?: string;
+        daysBack?: number;
+        daysForward?: number;
+    }
 ): Promise<number> {
-    const dates = datesAround(input.daysBack ?? 7, input.daysForward ?? 7);
+    const dates = datesAround(input.daysBack ?? 7, input.daysForward ?? 7, input.date);
 
     const existing = await db
         .select({ date: dailyInsights.date })
@@ -177,7 +185,7 @@ export async function backfillScoresForUser(
     const values = [];
 
     for (const date of missing) {
-        const { planets } = await getOrCreateTransits(db, date);
+        const { planets } = await getOrCreateTransits(db, date, input.profile.timezone);
 
         values.push(toRow(input.userId, date, scoreProfileForDate(input.profile, planets)));
     }
@@ -199,7 +207,27 @@ const CRON_BATCH_SIZE = 500;
  * ~110 aspect checks.
  */
 export async function generateScoresForAllUsers(db: Db, date: string): Promise<number> {
-    const { planets } = await getOrCreateTransits(db, date);
+    /**
+     * Transits differ by zone, so they are fetched per offset rather than once. The map
+     * keeps each one for the whole run — there are a few dozen zones in the world and
+     * far more users than that.
+     */
+    const transitsByOffset = new Map<number, TransitChart>();
+
+    const transitsFor = async (timezone: string | null): Promise<TransitChart> => {
+        const utcOffset = utcOffsetForDate(date, timezone);
+        const cached = transitsByOffset.get(utcOffset);
+
+        if (cached) {
+            return cached;
+        }
+
+        const { planets } = await getOrCreateTransits(db, date, timezone);
+
+        transitsByOffset.set(utcOffset, planets);
+
+        return planets;
+    };
 
     let offset = 0;
     let written = 0;
@@ -210,6 +238,7 @@ export async function generateScoresForAllUsers(db: Db, date: string): Promise<n
                 userId: profileTable.userId,
                 birthChart: profileTable.birthChart,
                 birthTime: profileTable.birthTime,
+                timezone: profileTable.timezone,
             })
             .from(profileTable)
             .orderBy(profileTable.userId)
@@ -220,13 +249,13 @@ export async function generateScoresForAllUsers(db: Db, date: string): Promise<n
             break;
         }
 
-        const values = batch.map((row) =>
-            toRow(
-                row.userId,
-                date,
-                scoreProfileForDate({ birthChart: row.birthChart, birthTime: row.birthTime }, planets)
-            )
-        );
+        const values = [];
+
+        for (const row of batch) {
+            const profile = { birthChart: row.birthChart, birthTime: row.birthTime, timezone: row.timezone };
+
+            values.push(toRow(row.userId, date, scoreProfileForDate(profile, await transitsFor(row.timezone))));
+        }
 
         await db.insert(dailyInsights).values(values).onConflictDoNothing();
 
@@ -245,6 +274,54 @@ export async function executeDailyScoresGeneration(db: Db): Promise<void> {
     const count = await generateScoresForAllUsers(db, date);
 
     console.log("[CRON] Done, wrote", count);
+}
+
+/**
+ * A run that claimed a day and then died — a deploy mid-generation, a crashed process —
+ * leaves the row in `pending` with nothing working on it.
+ *
+ * The claim in the insight route takes such a row back on its own after the same
+ * timeout, so correctness does not depend on this job. It exists so the client stops
+ * polling a day nobody is generating and gets an error it can retry instead.
+ */
+export function createStuckGenerationsJob(db: Db) {
+    const task = new AsyncTask(
+        "fail-stuck-generations",
+        async () => {
+            const insights = await db
+                .update(dailyInsights)
+                .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
+                .where(
+                    and(
+                        eq(dailyInsights.status, "pending"),
+                        lt(dailyInsights.updatedAt, sql`now() - interval '5 minutes'`)
+                    )
+                )
+                .returning({ date: dailyInsights.date });
+
+            const compatibility = await db
+                .update(compatibilityPeopleScores)
+                .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
+                .where(
+                    and(
+                        eq(compatibilityPeopleScores.status, "pending"),
+                        lt(compatibilityPeopleScores.updatedAt, sql`now() - interval '5 minutes'`)
+                    )
+                )
+                .returning({ date: compatibilityPeopleScores.date });
+
+            const stuck = insights.length + compatibility.length;
+
+            if (stuck > 0) {
+                console.log("[CRON] Timed out", stuck, "stuck generation(s)");
+            }
+        },
+        (err) => {
+            console.error("[CRON ERROR]", err);
+        }
+    );
+
+    return new CronJob({ cronExpression: "* * * * *" }, task);
 }
 
 export function createDailyScoresJob(db: Db) {

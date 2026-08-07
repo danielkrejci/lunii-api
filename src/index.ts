@@ -27,7 +27,11 @@ import {
 } from "fastify-type-provider-zod";
 
 import { MAX_IMAGE_SIZE } from "./lib/r2";
-import { createDailyScoresJob, executeDailyScoresGeneration } from "./modules/dailyScore/service";
+import {
+    createDailyScoresJob,
+    createStuckGenerationsJob,
+    executeDailyScoresGeneration,
+} from "./modules/dailyScore/service";
 import { createTransitJob, executeTransitsGeneration } from "./modules/transits";
 
 dayjs.extend(utc);
@@ -158,6 +162,7 @@ fastify.ready(async (err) => {
     // add cron jobs
     fastify.scheduler.addCronJob(job);
     fastify.scheduler.addCronJob(createDailyScoresJob(fastify.db));
+    fastify.scheduler.addCronJob(createStuckGenerationsJob(fastify.db));
 
     // immediate run: transits first, then tomorrow's scores for everyone
     await executeTransitsGeneration(fastify.db);

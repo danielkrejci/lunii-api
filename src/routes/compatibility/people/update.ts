@@ -1,19 +1,25 @@
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
-import { and, eq } from "drizzle-orm";
+import timezonePlugin from "dayjs/plugin/timezone.js";
+import utc from "dayjs/plugin/utc.js";
+import { and, eq, gte, sql } from "drizzle-orm";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { find as geoTz } from "geo-tz";
 import { z } from "zod";
 
-import { compatibilityPeople, compatibilityPeopleScores, transit } from "../../../db/schema";
+import { compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { computeNatalChart, EphemerisError } from "../../../modules/astro";
 import { calculateCompatibility, calculateDailyCompatibility } from "../../../modules/compatibilityPeople/aspects";
 import { BASE_NORMALIZER, normalizeScore, OVERALL_NORMALIZER } from "../../../modules/compatibilityPeople/normalizer";
+import { getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { serializeDrizzleData, takeUniqueOrThrow } from "../../../utils/drizzleUtils";
 import { Genders, getSunSign, Relationships, ZodiacSign } from "../../../utils/natalUtils";
 import { MIN_AGE } from "../../profile/add";
+
+dayjs.extend(utc);
+dayjs.extend(timezonePlugin);
 
 export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(
@@ -25,13 +31,17 @@ export default (async (fastify) => {
                     name: z.string().min(1, "Name is required").max(60, "Name must be at most 60 characters long"),
                     relationship: z.enum(Relationships, { message: "Relationship is invalid" }),
                     gender: z.enum(Genders, { message: "Gender is invalid" }),
+                    /** Wall clock, not an instant — see profile/add for why. */
                     birthDate: z
                         .string()
-                        .refine((date) => dayjs(date).isValid(), { message: "Birth date is invalid" })
+                        .regex(/^\d{4}-\d{2}-\d{2}$/u, "Birth date must be YYYY-MM-DD.")
                         .refine((date) => dayjs(date).isSameOrBefore(dayjs().subtract(MIN_AGE, "year"), "day"), {
                             message: `You must be at least ${MIN_AGE} years old`,
                         }),
-                    birthTime: z.string().nullable(),
+                    birthTime: z
+                        .string()
+                        .regex(/^\d{2}:\d{2}$/u, "Birth time must be HH:mm.")
+                        .nullable(),
                     birthPlace: z.string().nullable(),
                     birthPlaceLat: z.number().nullable(),
                     birthPlaceLng: z.number().nullable(),
@@ -96,8 +106,12 @@ export default (async (fastify) => {
                 // Get sun sign from birth date
                 const sunSign: ZodiacSign = getSunSign(dayjs(request.body.birthDate).toDate()).name;
 
-                // Use today's date
-                const date = dayjs().format("YYYY-MM-DD");
+                // The user own today, not the server one: in Auckland it is already
+                // tomorrow while Germany is still asleep, and the app asks for the date
+                // its own clock shows.
+                const date = dayjs()
+                    .tz(session.profile.timezone ?? "UTC")
+                    .format("YYYY-MM-DD");
 
                 // Use timezone from session if available
                 let timezone = session.profile.timezone;
@@ -130,21 +144,9 @@ export default (async (fastify) => {
                 // null without a birth time — an Ascendant derived from an assumed noon is meaningless
                 const risingSign: ZodiacSign | null = birthChart.ascendant?.sign ?? null;
 
-                // Get transits for today
-                const transits = await fastify.db
-                    .select()
-                    .from(transit)
-                    .where(eq(transit.date, date))
-                    .then(takeUniqueOrThrow);
-
-                if (!transits) {
-                    return reply.status(409).send({
-                        error: {
-                            code: "transit_not_found",
-                            message: "No transits found for this date",
-                        },
-                    });
-                }
+                // Sampled at local noon of the user own zone, so a date means the same
+                // span of time here as it does on their screen.
+                const transits = await getOrCreateTransits(fastify.db, date, session.profile.timezone);
 
                 // Compute base compatibility between the person and the current user
                 const baseCompatibility = calculateCompatibility(session.profile.birthChart, birthChart);
@@ -196,8 +198,8 @@ export default (async (fastify) => {
                             name: request.body.name,
                             gender: request.body.gender,
                             relationship: request.body.relationship,
-                            birthDate: dayjs(request.body.birthDate).format("YYYY-MM-DD"),
-                            birthTime: request.body.birthTime ? dayjs(request.body.birthTime).format("HH:mm") : null,
+                            birthDate: request.body.birthDate,
+                            birthTime: request.body.birthTime,
                             birthPlace: request.body.birthPlace,
                             birthPlaceLat: request.body.birthPlaceLat,
                             birthPlaceLng: request.body.birthPlaceLng,
@@ -220,23 +222,24 @@ export default (async (fastify) => {
                         })
                         .then(takeUniqueOrThrow);
 
-                    // Check if the compatibility score has changed
+                    /**
+                     * The birth data changed, so the reading was written about someone
+                     * else. Cleared from today forward — past days keep what the user
+                     * already read — and left as `absent`, so the next read of that
+                     * person starts a fresh generation.
+                     */
                     if (prevBaseScore !== baseScore || prevOverallScore !== overallScore) {
-                        // Delete previous compatibility insights
                         await tx
                             .update(compatibilityPeopleScores)
                             .set({
-                                overview: null,
-                                positiveOverview: null,
-                                negativeOverview: null,
-                                insights: null,
-                                practicalAdvice: null,
-                                rawInput: null,
+                                content: null,
+                                status: "absent",
+                                updatedAt: sql`date_trunc('milliseconds', now())`,
                             })
                             .where(
                                 and(
                                     eq(compatibilityPeopleScores.personId, request.body.id),
-                                    eq(compatibilityPeopleScores.date, date)
+                                    gte(compatibilityPeopleScores.date, date)
                                 )
                             );
                     }

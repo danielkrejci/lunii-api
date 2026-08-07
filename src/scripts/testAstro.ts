@@ -35,8 +35,8 @@ console.log(
     "deg"
 );
 
-console.log("\n=== 3. transit chart @ 00:00 UTC ===");
-const transits = computeTransitChart(transitInstantForDate("2026-08-04"));
+console.log("\n=== 3. transit chart @ 12:00 UTC ===");
+const transits = computeTransitChart(transitInstantForDate("2026-08-04", 0));
 console.log("moon:", transits.moon.sign, transits.moon.longitude.toFixed(3), "speed:", transits.moon.speed?.toFixed(3));
 console.log("saturn:", transits.saturn.sign, "retro:", transits.saturn.retrograde);
 

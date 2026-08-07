@@ -74,7 +74,14 @@ export interface DailyCompatibilityResult {
     partnerAspects: ScoredTransitAspect[];
 }
 
-export type RelationshipCategory = "emotional" | "communication" | "chemistry" | "trust" | "longTerm";
+/** A value, not just a type, so the route schema can validate against the same list. */
+export const RELATIONSHIP_CATEGORIES = ["emotional", "communication", "chemistry", "trust", "longTerm"] as const;
+
+export type RelationshipCategory = (typeof RELATIONSHIP_CATEGORIES)[number];
+
+export const INSIGHT_DIRECTIONS = ["positive", "neutral", "negative"] as const;
+
+export type InsightDirection = (typeof INSIGHT_DIRECTIONS)[number];
 
 export type TransitCategory = "emotional" | "love" | "communication" | "motivation";
 

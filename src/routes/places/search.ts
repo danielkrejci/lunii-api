@@ -59,6 +59,12 @@ export default (async (fastify) => {
                             query: z.string(),
                         }),
                     }),
+                    401: z.object({
+                        error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
                     500: z.object({
                         error: z.object({
                             code: z.string(),
@@ -69,6 +75,20 @@ export default (async (fastify) => {
             },
         },
         async (request, reply) => {
+            /**
+             * Onboarding signs in before it asks for a birth place, so a session always
+             * exists by the time this is called. Required rather than assumed, because
+             * every call is billed by the places provider and the rate limit falls back
+             * to the IP without one.
+             */
+            const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+
+            if (!session) {
+                return reply.status(401).send({
+                    error: { code: "unauthorized", message: "User must be logged in to access this resource." },
+                });
+            }
+
             // return reply.status(200).send({
             //     data: {
             //         results: [

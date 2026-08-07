@@ -11,7 +11,6 @@ import { z } from "zod";
 import { profile } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { computeNatalChart, EphemerisError } from "../../modules/astro";
-import { backfillScoresForUser } from "../../modules/dailyScore/service";
 import { Gender, Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
 
 dayjs.extend(utc);
@@ -31,17 +30,33 @@ export default (async (fastify) => {
                         .string()
                         .min(1, "Please select your gender.")
                         .refine((value) => Genders.includes(value as Gender), "Invalid gender."),
-                    birthDate: z.string().refine(
-                        (date) => {
-                            const today = new Date();
-                            const minDate = new Date(today.getFullYear() - MIN_AGE, today.getMonth(), today.getDate());
-                            return new Date(date) <= minDate;
-                        },
-                        {
-                            message: `You must be at least ${MIN_AGE} years old.`,
-                        }
-                    ),
-                    birthTime: z.string().nullable(),
+                    /**
+                     * Wall clock, not an instant. The chart is built from the calendar
+                     * date and clock time the user picked, put into the timezone of the
+                     * birth place — an ISO timestamp would already carry the phone's
+                     * offset and land on the wrong day for anyone east or west of here.
+                     */
+                    birthDate: z
+                        .string()
+                        .regex(/^\d{4}-\d{2}-\d{2}$/u, "Birth date must be YYYY-MM-DD.")
+                        .refine(
+                            (date) => {
+                                const today = new Date();
+                                const minDate = new Date(
+                                    today.getFullYear() - MIN_AGE,
+                                    today.getMonth(),
+                                    today.getDate()
+                                );
+                                return new Date(date) <= minDate;
+                            },
+                            {
+                                message: `You must be at least ${MIN_AGE} years old.`,
+                            }
+                        ),
+                    birthTime: z
+                        .string()
+                        .regex(/^\d{2}:\d{2}$/u, "Birth time must be HH:mm.")
+                        .nullable(),
                     birthPlace: z.string().min(1, "Please enter your birth place."),
                     birthPlaceLat: z
                         .number()
@@ -149,15 +164,13 @@ export default (async (fastify) => {
                     timezone: detectedTimezone,
                 });
 
-                const birthTime = request.body.birthTime ? dayjs(request.body.birthTime).format("HH:mm") : null;
-
                 await fastify.db.insert(profile).values({
                     userId: session.user.id,
                     name: request.body.name,
                     referrer: request.body.referrer,
                     gender: request.body.gender as Gender,
                     birthDate: request.body.birthDate,
-                    birthTime,
+                    birthTime: request.body.birthTime,
                     birthPlace: request.body.birthPlace,
                     birthPlaceLat: request.body.birthPlaceLat,
                     birthPlaceLng: request.body.birthPlaceLng,
@@ -177,21 +190,6 @@ export default (async (fastify) => {
                     personalityProfile: request.body.personalityProfile,
                     birthChart,
                     personalityProfileInput: request.body.personalityProfileInput,
-                });
-
-                /**
-                 * Fill the score window right after onboarding. The session hook in lib/auth
-                 * cannot do it for a brand-new account: the session is created before the
-                 * profile exists, and sessions live long enough that a second create may be
-                 * months away.
-                 *
-                 * Fire and forget, as on sign-in — a backfill failure must not fail onboarding.
-                 */
-                void backfillScoresForUser(fastify.db, {
-                    userId: session.user.id,
-                    profile: { birthChart, birthTime },
-                }).catch((error) => {
-                    request.log.error({ err: error }, "backfillScoresForUser failed after onboarding");
                 });
 
                 reply.status(200).send({

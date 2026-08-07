@@ -9,7 +9,6 @@ import { db } from "../db";
 import * as schema from "../db/schema";
 import { account, profile } from "../db/schema";
 import { env } from "../env";
-import { backfillScoresForUser } from "../modules/dailyScore/service";
 import { serializeDrizzleData } from "../utils/drizzleUtils";
 
 export async function generateAppleClientSecret() {
@@ -126,38 +125,6 @@ const config = {
         cookieCache: {
             enabled: true,
             maxAge: 60 * 5,
-        },
-    },
-    databaseHooks: {
-        session: {
-            create: {
-                /**
-                 * Fill the user's score window on sign-in. Scores only — no AI — so this
-                 * is pure CPU over ~15 days and costs nothing per login.
-                 *
-                 * Fire and forget on purpose: a backfill failure must never block or fail
-                 * a sign-in.
-                 */
-                after: async (session) => {
-                    const [userProfile] = await db
-                        .select({ birthChart: profile.birthChart, birthTime: profile.birthTime })
-                        .from(profile)
-                        .where(eq(profile.userId, session.userId))
-                        .limit(1);
-
-                    // No profile yet means onboarding is unfinished; nothing to score against.
-                    if (!userProfile) {
-                        return;
-                    }
-
-                    void backfillScoresForUser(db, {
-                        userId: session.userId,
-                        profile: userProfile,
-                    }).catch((error) => {
-                        console.error("backfillScoresForUser failed", error);
-                    });
-                },
-            },
         },
     },
     rateLimit: {

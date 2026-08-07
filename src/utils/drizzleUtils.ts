@@ -12,7 +12,6 @@ export function serializeDrizzleData<T>(obj: T): T {
         ) as unknown as T;
     } else if (typeof obj === "string" && obj !== "" && !isNaN(Number(obj))) {
         return Number(obj) as unknown as T;
-    } else {
-        return obj;
     }
+    return obj;
 }

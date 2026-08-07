@@ -169,6 +169,34 @@
       "when": 1785941347216,
       "tag": "0023_secret_namor",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1786130398870,
+      "tag": "0024_glamorous_green_goblin",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1786131330608,
+      "tag": "0025_flaky_siren",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1786139093018,
+      "tag": "0026_magenta_switch",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1786141981928,
+      "tag": "0027_perfect_hellion",
+      "breakpoints": true
     }
   ]
 }

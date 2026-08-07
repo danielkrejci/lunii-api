@@ -5,11 +5,12 @@ import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { compatibilityPeople, compatibilityPeopleScores, transit } from "../../../db/schema";
+import { compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { calculateDailyCompatibility } from "../../../modules/compatibilityPeople/aspects";
 import { normalizeScore, OVERALL_NORMALIZER } from "../../../modules/compatibilityPeople/normalizer";
-import { serializeDrizzleData, takeUniqueOrThrow } from "../../../utils/drizzleUtils";
+import { getOrCreateTransits } from "../../../modules/dailyScore/service";
+import { serializeDrizzleData } from "../../../utils/drizzleUtils";
 import { SINGS_MAP } from "../../../utils/natalUtils";
 
 export default (async (fastify) => {
@@ -86,20 +87,7 @@ export default (async (fastify) => {
             try {
                 const date = dayjs.utc(request.query.date).format("YYYY-MM-DD");
 
-                const transits = await fastify.db
-                    .select()
-                    .from(transit)
-                    .where(eq(transit.date, date))
-                    .then(takeUniqueOrThrow);
-
-                if (!transits) {
-                    return reply.status(409).send({
-                        error: {
-                            code: "transit_not_found",
-                            message: "No transits found for this date",
-                        },
-                    });
-                }
+                const transits = await getOrCreateTransits(fastify.db, date, session.profile.timezone);
 
                 const people = await fastify.db
                     .select({

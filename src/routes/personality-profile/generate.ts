@@ -8,9 +8,11 @@ import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { find as geoTz } from "geo-tz";
 import { z } from "zod";
 
+import { aiGenerations } from "../../db/schema";
 import { ai } from "../../lib/ai";
 import { auth } from "../../lib/auth";
 import swisseph from "../../lib/swisseph";
+import { toAbsoluteBirthDate } from "../../modules/astro";
 import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageUtils";
 import { Gender, Genders, SINGS_MAP } from "../../utils/natalUtils";
 import { parseLLMJson } from "../../utils/stringUtils";
@@ -18,6 +20,11 @@ import { MIN_AGE } from "../profile/add";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
+
+const MODEL = "gemini-2.5-flash";
+
+/** List price per million tokens, so the logged cost is what was actually charged. */
+const PRICE_PER_MILLION = { input: 0.3, output: 2.5 };
 
 export default (async (fastify) => {
     await fastify.register(rateLimit, {
@@ -53,17 +60,28 @@ export default (async (fastify) => {
                         .string()
                         .min(1, "Please select your gender.")
                         .refine((value) => Genders.includes(value as Gender), "Invalid gender."),
-                    birthDate: z.string().refine(
-                        (date) => {
-                            const today = new Date();
-                            const minDate = new Date(today.getFullYear() - MIN_AGE, today.getMonth(), today.getDate());
-                            return new Date(date) <= minDate;
-                        },
-                        {
-                            message: `You must be at least ${MIN_AGE} years old.`,
-                        }
-                    ),
-                    birthTime: z.string().nullable(),
+                    /** Wall clock, not an instant — see profile/add for why. */
+                    birthDate: z
+                        .string()
+                        .regex(/^\d{4}-\d{2}-\d{2}$/u, "Birth date must be YYYY-MM-DD.")
+                        .refine(
+                            (date) => {
+                                const today = new Date();
+                                const minDate = new Date(
+                                    today.getFullYear() - MIN_AGE,
+                                    today.getMonth(),
+                                    today.getDate()
+                                );
+                                return new Date(date) <= minDate;
+                            },
+                            {
+                                message: `You must be at least ${MIN_AGE} years old.`,
+                            }
+                        ),
+                    birthTime: z
+                        .string()
+                        .regex(/^\d{2}:\d{2}$/u, "Birth time must be HH:mm.")
+                        .nullable(),
                     birthPlace: z.string().min(1, "Please enter your birth place."),
                     birthPlaceLat: z
                         .number()
@@ -97,6 +115,12 @@ export default (async (fastify) => {
                             personalityProfileInput: z.string(),
                         }),
                     }),
+                    401: z.object({
+                        error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
                     409: z.object({
                         error: z.object({
                             code: z.string(),
@@ -113,18 +137,33 @@ export default (async (fastify) => {
             },
         },
         async (request, reply) => {
+            const session = await auth.api.getSession({
+                headers: fromNodeHeaders(request.headers),
+            });
+
+            if (!session) {
+                return reply.status(401).send({
+                    error: {
+                        code: "unauthorized",
+                        message: "User must be logged in to access this resource.",
+                    },
+                });
+            }
+
             const detectedTimezone = geoTz(request.body.birthPlaceLat, request.body.birthPlaceLng)[0] || "UTC";
 
-            const birthDate = dayjs(request.body.birthDate);
-            const birthTime = request.body.birthTime ? dayjs(request.body.birthTime) : dayjs().hour(12).minute(0);
-
-            const absoluteBirthDate = dayjs
-                .tz(birthDate.format("YYYY-MM-DD"), detectedTimezone)
-                .hour(birthTime.hour())
-                .minute(birthTime.minute())
-                .second(0)
-                .millisecond(0)
-                .toDate();
+            /**
+             * Shared with the natal chart on purpose: the wall clock the user picked, put
+             * into the timezone of the birth place. Computing it here separately is how
+             * the two used to drift apart.
+             */
+            const absoluteBirthDate = toAbsoluteBirthDate({
+                birthDate: request.body.birthDate,
+                birthTime: request.body.birthTime,
+                birthPlaceLat: request.body.birthPlaceLat,
+                birthPlaceLng: request.body.birthPlaceLng,
+                timezone: detectedTimezone,
+            });
 
             // compute moon sign
             const jdMoon = swisseph.swe_julday(
@@ -170,7 +209,8 @@ export default (async (fastify) => {
                 jdRising,
                 request.body.birthPlaceLat,
                 request.body.birthPlaceLng,
-                "P" // Placidus system
+                // Placidus system
+                "P"
             );
 
             if ("error" in houses) {
@@ -247,8 +287,10 @@ export default (async (fastify) => {
                     - Spiritual belief level: ${request.body.beliefLevel}
                   `;
 
+                const startedAt = Date.now();
+
                 const response = await ai.models.generateContent({
-                    model: "gemini-2.5-flash",
+                    model: MODEL,
                     contents: prompt,
                 });
 
@@ -256,19 +298,49 @@ export default (async (fastify) => {
                 //     text: '{"core":"Vaše přirozenost se projevuje vnímavostí k okolním náladám a nenápadnou schopností splynout s prostředím. Intuitivně chápete nevyslovené.","emotions":"Váš emoční svět je hluboký a skrytý, intenzivně prožíváte pocity, které jen tak neukážete. Hledáte skutečnou intimitu a pravdu.","expression":"Navzdory vnitřní citlivosti působíte na ostatní přímočaře a energicky. Do nových věcí se pouštíte s elánem a sebedůvěrou.","relationships":"V partnerství toužíte po hluboké, transformativní vazbě založené na důvěře a sdílené intenzitě. Snažíte se o opravdové pochopení.","growth":"Vnitřní rozpor mezi citlivostí a ráznou vnější akcí je zdrojem růstu. Učíte se transformovat hluboké pocity v konstruktivní činy."}',
                 // };
 
-                const personalityProfile = parseLLMJson<{
+                const parsed = parseLLMJson<{
                     core: string;
                     emotions: string;
                     expression: string;
                     relationships: string;
                     growth: string;
-                }>(response.text ?? "") ?? {
+                }>(response.text ?? "");
+
+                const personalityProfile = parsed ?? {
                     core: "",
                     emotions: "",
                     expression: "",
                     relationships: "",
                     growth: "",
                 };
+
+                const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
+                const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+
+                // Audit only — never allowed to fail onboarding.
+                await fastify.db
+                    .insert(aiGenerations)
+                    .values({
+                        userId: session.user.id,
+                        type: "personalityProfile",
+                        status: parsed ? "success" : "error",
+                        error: parsed
+                            ? null
+                            : `Unusable answer (finishReason: ${response.candidates?.[0]?.finishReason ?? "unknown"})`,
+                        requestId: response.responseId ?? "",
+                        provider: "google",
+                        model: MODEL,
+                        input: prompt,
+                        output: response.text ?? "",
+                        inputTokens,
+                        outputTokens,
+                        total_tokens: response.usageMetadata?.totalTokenCount ?? inputTokens + outputTokens,
+                        latencyMs: Date.now() - startedAt,
+                        cost:
+                            (inputTokens / 1_000_000) * PRICE_PER_MILLION.input +
+                            (outputTokens / 1_000_000) * PRICE_PER_MILLION.output,
+                    })
+                    .catch((error: unknown) => request.log.error({ err: error }, "Failed to log AI generation"));
 
                 // console.log({
                 //     sunSign: request.body.sunSign.toLowerCase(),

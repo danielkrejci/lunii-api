@@ -1,12 +1,15 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
     boolean,
+    check,
     date,
     doublePrecision,
     index,
+    integer,
     jsonb,
     numeric,
     pgTable,
+    primaryKey,
     text,
     time,
     timestamp,
@@ -16,9 +19,32 @@ import {
 import { NatalChart } from "../modules/astro";
 import { DailyOverviewResponse } from "../modules/compatibilityPeople/ai";
 import { CompatibilityResult, DailyCompatibilityResult } from "../modules/compatibilityPeople/types";
-import { RawScores, ScoreBreakdown } from "../modules/dailyScore/types";
-import { DailyInsight, DailyPlanetInsight } from "../modules/insights";
+import { DailyInsightContent, GenerationStatus } from "../modules/insights";
 import { Gender, Relationship, TransitAspects, TransitPlanets, ZodiacSign } from "../utils/natalUtils";
+
+export const aiGenerations = pgTable("ai_generations", {
+    id: text()
+        .primaryKey()
+        .notNull()
+        .$defaultFn(() => crypto.randomUUID()),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    userId: text("user_id")
+        .notNull()
+        .references(() => user.id, { onDelete: "cascade" }),
+    requestId: text("request_id").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    type: text("type").$type<"dailyInsight" | "compatibilityPeople" | "personalityProfile">().notNull(),
+    status: text("status").$type<"success" | "error">().notNull(),
+    error: text("error"),
+    input: jsonb("input").notNull(),
+    output: jsonb("output"),
+    inputTokens: numeric("input_tokens", { mode: "number" }).notNull(),
+    outputTokens: numeric("output_tokens", { mode: "number" }).notNull(),
+    total_tokens: numeric("total_tokens", { mode: "number" }).notNull(),
+    latencyMs: numeric("latency_ms", { mode: "number" }).notNull(),
+    cost: numeric("cost", { mode: "number" }).notNull(),
+});
 
 export const compatibilityPeopleScores = pgTable(
     "compatibility_people_scores",
@@ -29,19 +55,27 @@ export const compatibilityPeopleScores = pgTable(
             .references(() => compatibilityPeople.id, { onDelete: "cascade" }),
         score: numeric("score", { mode: "number" }).notNull(),
         compatibility: jsonb("compatibility").$type<DailyCompatibilityResult>().notNull(),
-        overview: text("overview"),
-        positiveOverview: jsonb("positive_overview").$type<DailyOverviewResponse["positiveOverview"]>(),
-        negativeOverview: jsonb("negative_overview").$type<DailyOverviewResponse["negativeOverview"]>(),
-        insights: jsonb("insights").$type<DailyOverviewResponse["insights"]>(),
-        practicalAdvice: text("practical_advice"),
-        rawInput: text("raw_input"),
+
+        /** The whole AI-written half. Null until generated, complete once it is. */
+        content: jsonb("content").$type<DailyOverviewResponse>(),
+
+        /**
+         * Lifecycle of the generation. `updated_at` carries the time of its last change
+         * and doubles as the timeout for a run that died mid-flight — so nothing outside
+         * that lifecycle may write to this row, and `$onUpdate` must stay off.
+         */
+        status: text("status").$type<GenerationStatus>().default("absent").notNull(),
+
         createdAt: timestamp("created_at").defaultNow().notNull(),
-        updatedAt: timestamp("updated_at")
-            .defaultNow()
-            .$onUpdate(() => new Date())
-            .notNull(),
+        updatedAt: timestamp("updated_at").defaultNow().notNull(),
     },
-    (table) => [uniqueIndex("compatibility_people_scores_person_date_idx").on(table.personId, table.date)]
+    (table) => [
+        uniqueIndex("compatibility_people_scores_person_date_idx").on(table.personId, table.date),
+        check(
+            "compatibility_people_scores_ready_has_content",
+            sql`((${table.status} = 'ready' and ${table.content} is not null) or (${table.status} <> 'ready' and ${table.content} is null))`
+        ),
+    ]
 );
 
 export const compatibilityPeople = pgTable(
@@ -86,59 +120,46 @@ export const dailyInsights = pgTable(
             .notNull()
             .references(() => user.id, { onDelete: "cascade" }),
         date: date("date", { mode: "string" }).notNull(),
-        overview: jsonb("overview").$type<DailyInsight["overview"]>(),
-        moon: jsonb("moon").$type<DailyInsight["moon"]>(),
+        status: text("status").$type<GenerationStatus>().default("absent").notNull(),
+
         loveScore: numeric("love_score", { mode: "number" }).notNull(),
-        loveInsight: jsonb("love_insight").$type<DailyInsight["insights"]["love"]>(),
         careerScore: numeric("career_score", { mode: "number" }).notNull(),
-        careerInsight: jsonb("career_insight").$type<DailyInsight["insights"]["career"]>(),
         healthScore: numeric("health_score", { mode: "number" }).notNull(),
-        healthInsight: jsonb("health_insight").$type<DailyInsight["insights"]["health"]>(),
         moodScore: numeric("mood_score", { mode: "number" }).notNull(),
-        moodInsight: jsonb("mood_insight").$type<DailyInsight["insights"]["mood"]>(),
         overallScore: numeric("overall_score", { mode: "number" }).notNull(),
-        overallInsight: jsonb("overall_insight").$type<DailyInsight["insights"]["overall"]>(),
-        opportunity: jsonb("opportunity").$type<DailyInsight["opportunity"]>(),
-        watchOut: jsonb("watch_out").$type<DailyInsight["watchOut"]>(),
-        deepInsight: text("deep_insight"),
-        /**
-         * Per-body weight with the AI's interpretation. Stored rather than recomputed
-         * because the text is part of it, and regenerating text is neither free nor
-         * deterministic.
-         */
-        planets: jsonb("planets").$type<DailyPlanetInsight[]>(),
-        /**
-         * Pre-squash sums. Without these a score cannot be explained later: the
-         * 0-100 value alone says nothing about how it got there.
-         */
-        rawScores: jsonb("raw_scores").$type<RawScores>(),
-        /** 0-1. How much aspect weight the chart produced. Metadata — never part of the score. */
-        confidence: numeric("confidence", { mode: "number" }),
-        /** Strongest contributions per area plus the narrative top list, for debugging and the prompt. */
-        scoreBreakdown: jsonb("score_breakdown").$type<ScoreBreakdown>(),
-        /**
-         * Which engine produced this row. Recomputing an old row after rules.ts moved
-         * on legitimately gives a different number; without this there is no way to
-         * tell that apart from a bug.
-         */
-        engineVersion: text("engine_version"),
-        calibrationVersion: text("calibration_version"),
-        rawResponse: text("raw_response"),
-        rawInput: text("raw_input"),
+
+        content: jsonb("content").$type<DailyInsightContent>(),
+
         createdAt: timestamp("created_at").defaultNow().notNull(),
-        updatedAt: timestamp("updated_at")
-            .defaultNow()
-            .$onUpdate(() => new Date())
-            .notNull(),
+        updatedAt: timestamp("updated_at").defaultNow().notNull(),
     },
-    (table) => [uniqueIndex("daily_insights_user_id_date_idx").on(table.userId, table.date)]
+    (table) => [
+        uniqueIndex("daily_insights_user_id_date_idx").on(table.userId, table.date),
+        check(
+            "daily_insights_ready_has_content",
+            sql`((${table.status} = 'ready' and ${table.content} is not null) or (${table.status} <> 'ready' and ${table.content} is null))`
+        ),
+    ]
 );
 
-export const transit = pgTable("transit", {
-    date: date("date", { mode: "string" }).primaryKey(),
-    planets: jsonb("planets").$type<TransitPlanets>().notNull(),
-    aspects: jsonb("aspects").$type<TransitAspects>().notNull(),
-});
+export const transit = pgTable(
+    "transit",
+    {
+        date: date("date", { mode: "string" }).notNull(),
+        /**
+         * Offset in minutes of the zone this row was computed for, so half- and
+         * quarter-hour zones fit too (India +330, Nepal +345, Chatham +765).
+         *
+         * A date is a different span of time in every zone, and the Moon moves half a
+         * degree an hour — one row per date would put a user in Auckland and one in
+         * Honolulu on the same planetary positions half a day apart.
+         */
+        utcOffset: integer("utc_offset").notNull(),
+        planets: jsonb("planets").$type<TransitPlanets>().notNull(),
+        aspects: jsonb("aspects").$type<TransitAspects>().notNull(),
+    },
+    (table) => [primaryKey({ columns: [table.date, table.utcOffset] })]
+);
 
 export const profile = pgTable(
     "profile",

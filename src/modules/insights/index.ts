@@ -1,8 +1,11 @@
+import { z } from "zod";
+
 import { ai } from "../../lib/ai";
 import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageUtils";
 import { ZodiacSign } from "../../utils/natalUtils";
 import { getLLMJson, parseLLMJson } from "../../utils/stringUtils";
-import { MAX_ORBS, orbStrength, Planet as AstroPlanet } from "../astro";
+import { toResponseJsonSchema } from "../../utils/zodResponse";
+import { MAX_ORBS, orbStrength, Planet as AstroPlanet, Planet, PLANETS } from "../astro";
 import { ASPECT_STRENGTH } from "../dailyScore/factors";
 import { DailyScoreResult, PlanetInfluence as PlanetWeight } from "../dailyScore/types";
 import { getMoonPhase } from "../transits";
@@ -19,17 +22,7 @@ import { SIGN_PROFILES } from "./signProfiles";
    TYPES
 ============================================================ */
 
-export type Planet =
-    | "sun"
-    | "moon"
-    | "mercury"
-    | "venus"
-    | "mars"
-    | "jupiter"
-    | "saturn"
-    | "uranus"
-    | "neptune"
-    | "pluto";
+export type { Planet };
 
 export type AspectType = "conjunction" | "opposition" | "square" | "trine" | "sextile";
 
@@ -541,6 +534,8 @@ export function buildPrompt(input: {
     language: string;
     relationshipStatus?: string;
     priorities?: string[];
+    /** Per-body weights from the engine. The model interprets them, never rescores them. */
+    planets: PlanetWeight[];
 }) {
     const { analysis, sunSign, moonSign, language, relationshipStatus, priorities } = input;
 
@@ -550,6 +545,39 @@ export function buildPrompt(input: {
     const dominantPlanet = dominantPlanets[0];
 
     const { loveScore, careerScore, healthScore, moodScore, overallScore } = input.score.scores;
+
+    /**
+     * Orb and strength are here so the model can tell an aspect 0.2° from exact apart
+     * from one about to leave orb. Flattened to text they read identically, yet only
+     * one of them is worth calling today's dominant influence.
+     */
+    const bodies = input.planets
+        .map((planet) => {
+            const profile = PLANET_PROFILES[planet.name];
+
+            const contacts =
+                planet.contacts.length > 0
+                    ? planet.contacts
+                          .map(
+                              (contact) =>
+                                  `  - id: ${contact.id} | ${contact.reason} | "${
+                                      contact.title
+                                  }" | orb ${contact.orb.toFixed(1)}°, exactness ${Math.round(
+                                      contact.strength * 100
+                                  )}%, ${contact.value >= 0 ? "supportive" : "difficult"}`
+                          )
+                          .join("\n")
+                    : "  - none — this body makes no contact with the chart today";
+
+            return `
+${profile.displayName} (id: ${planet.name})
+Weight today: ${planet.score}/100, from ${planet.aspects} aspect${planet.aspects === 1 ? "" : "s"}
+Meaning: ${profile.description}
+Keywords: ${profile.keywords.join(", ")}
+Today's contacts:
+${contacts}`;
+        })
+        .join("\n");
 
     /**
      * The specific transits behind today's numbers, ordered by narrative interest
@@ -1065,6 +1093,42 @@ If the user's priorities naturally align with today's astrology, gently incorpor
 Never force them into the narrative.
 
 ==================================================
+TODAY'S PLANETS
+==================================================
+
+Besides the horoscope you also write one interpretation per planetary body, for the
+panel the reader opens from the horoscope. Same day, same voice, same context — which
+is why it is written here rather than in a request of its own.
+
+Each body carries a score from 0–100 describing how active it is TODAY in this chart.
+The score measures importance, not positivity. A high score means strong influence,
+not a good day. A score near zero means the body is largely inactive today.
+
+Never mention the score. Never mention numbers.
+
+Every contact carries an orb and an exactness percentage. Exactness describes how
+precisely the contact lands today:
+
+High exactness (roughly 80–100%) means the influence is at its peak right now. Write
+about it as something clearly present today.
+
+Medium exactness (roughly 40–80%) means it is building or fading. Write about it as a
+background influence rather than the main event.
+
+Low exactness (below roughly 40%) means it is barely in effect. Mention it only if
+nothing else is happening for that body.
+
+When one body has several contacts, let the most exact one lead the description, and
+use the others only where they genuinely change the picture. Never state the orb or
+the percentage — translate them into how present the influence feels.
+
+Each contact is listed as:
+
+  id | English label | "English title" | orb, exactness, direction
+
+${bodies}
+
+==================================================
 OUTPUT
 ==================================================
 
@@ -1125,7 +1189,20 @@ Return ONLY valid JSON.
             "string"
         ]
     },
-    "deepInsight": "string"
+    "deepInsight": "string",
+    "planets": [
+        {
+            "name": "sun",
+            "description": "string",
+            "reason": "string",
+            "contacts": [
+                {
+                    "id": "string",
+                    "title": "string"
+                }
+            ]
+        }
+    ]
 }
 
 Field requirements:
@@ -1172,6 +1249,26 @@ Field requirements:
 
 - deepInsight:
   A detailed horoscope with multiple paragraphs explaining today's astrological influences, practical implications and guidance.
+
+- planets:
+  Exactly one object for every planet listed under TODAY'S PLANETS, in the same order.
+  Use the exact id as "name". Never return the score, the orb or the exactness.
+  Never invent contacts: return exactly the ones listed for that body, in the same
+  order, and copy each "id" character for character. A body with no contacts gets an
+  empty "contacts" array.
+
+- planets[].description:
+  Exactly 3 paragraphs separated by a blank line, 600–1000 characters in total, about
+  TODAY only. First what the influence does in everyday life, then why it is stronger
+  or weaker than usual. Never name aspects, signs or astrological jargon here.
+
+- planets[].reason:
+  Exactly 2 paragraphs separated by a blank line, 350–650 characters in total. Explain
+  the mechanism behind today's influence in plain, everyday language.
+
+- planets[].contacts[].title:
+  Translate the English title. It is a caption shown next to the numbers, not prose:
+  a short headline, never longer than the original and never a sentence.
 
 Do not return markdown.
 
@@ -1623,6 +1720,48 @@ export interface DailyScores {
     moodScore: number;
     overallScore: number;
 }
+
+export interface DailyInsightContent {
+    overview: {
+        title: string;
+        description: string;
+    };
+    deepInsight: string[];
+    moon: {
+        insight: string;
+        reason: string;
+    };
+    opportunity: {
+        description: string;
+        examples: string[];
+    };
+    watchOut: {
+        description: string;
+        examples: string[];
+    };
+    insights: Record<
+        "love" | "career" | "health" | "mood" | "overall",
+        {
+            insight: string;
+            reason: string;
+        }
+    >;
+    planets: {
+        name: Planet;
+        description: string;
+        reason: string;
+        contacts: Record<
+            string,
+            {
+                id: string;
+                title: string;
+            }
+        >;
+    }[];
+}
+
+export type GenerationStatus = "absent" | "pending" | "ready" | "failed";
+
 export interface DailyInsight {
     overview: {
         title: string;
@@ -1705,6 +1844,53 @@ export interface DailyPlanetInsight {
     contacts?: DailyContactText[];
 }
 
+const MODEL = "gemini-2.5-flash";
+
+const wordingSchema = z.object({
+    insight: z.string(),
+    reason: z.string(),
+});
+
+/**
+ * What the model is asked to return — not what gets stored. The engine's numbers are
+ * copied back in afterwards and `deepInsight` is split into paragraphs, so this mirrors
+ * the OUTPUT block of the prompt rather than `DailyInsightContent`.
+ *
+ * Handed to the decoder as a response schema, so a malformed answer stops being
+ * possible instead of being caught after the fact.
+ */
+const answerSchema = z.object({
+    overview: z.object({ title: z.string(), description: z.string() }),
+    moon: z.object({ phase: z.string(), insight: z.string(), reason: z.string() }),
+    insights: z.object({
+        love: wordingSchema,
+        career: wordingSchema,
+        health: wordingSchema,
+        mood: wordingSchema,
+        overall: wordingSchema,
+    }),
+    opportunity: z.object({ description: z.string(), examples: z.array(z.string()) }),
+    watchOut: z.object({ description: z.string(), examples: z.array(z.string()) }),
+    deepInsight: z.string(),
+    planets: z.array(
+        z.object({
+            name: z.enum(PLANETS),
+            description: z.string(),
+            reason: z.string(),
+            contacts: z.array(z.object({ id: z.string(), title: z.string() })),
+        })
+    ),
+});
+
+/** List price per million tokens, so the logged cost is what was actually charged. */
+const PRICE_PER_MILLION = { input: 0.3, output: 2.5 };
+
+/**
+ * One request writes the horoscope and the planetary panel together: they describe the
+ * same day from the same context, and a second request would pay twice for that
+ * context. Never throws on a bad answer — the caller logs every call, successful or
+ * not, so a parse failure has to come back with its metrics attached.
+ */
 export async function generateDailyInsight(input: {
     transits: DailyTransits;
     /**
@@ -1712,27 +1898,38 @@ export async function generateDailyInsight(input: {
      * the numbers come from modules/dailyScore, which is deterministic and tested.
      */
     score: DailyScoreResult;
+    planets: PlanetWeight[];
     sunSign: string;
     moonSign: string;
     languageIso: string;
     relationshipStatus?: string;
     priorities?: string[];
     goals?: string[];
-}): Promise<
-    DailyInsight & {
-        rawResponse: string;
-        rawInput: string;
-    }
-> {
+}): Promise<{
+    content: DailyInsightContent | null;
+    usage: {
+        requestId: string;
+        provider: string;
+        model: string;
+        input: string;
+        output: string;
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens: number;
+        latencyMs: number;
+        cost: number;
+        /** Set when the model answered but the answer was unusable. */
+        error: string | null;
+    };
+}> {
     const analysis = analyzeTransits(input.transits);
 
     const language = getLanguageByIso(input.languageIso);
 
-    const dailyScores = input.score.scores;
-
     const prompt = buildPrompt({
         analysis,
         score: input.score,
+        planets: input.planets,
         sunSign: input.sunSign,
         moonSign: input.moonSign,
         relationshipStatus: input.relationshipStatus,
@@ -1740,579 +1937,110 @@ export async function generateDailyInsight(input: {
         language: language ? buildPromptLanguageRule(language) : input.languageIso,
     });
 
+    const startedAt = Date.now();
+
     const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: MODEL,
         contents: prompt,
         config: {
             responseMimeType: "application/json",
+            responseJsonSchema: toResponseJsonSchema(answerSchema),
         },
     });
 
-    // console.log("======== PROMPT =========");
-    // console.log(JSON.stringify(prompt));
-    // console.log("======== PROMPT =========");
-    // console.log("======== RESPONSE =========");
-    // console.log(JSON.stringify(response.text));
-    // console.log("======== RESPONSE =========");
-
     const text = response.text ?? "";
 
-    const result = parseLLMJson<DailyInsight>(text);
+    const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
+    const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
 
-    if (!result) {
-        throw new Error("Failed to parse horoscope response");
-    }
-
-    return {
-        overview: result.overview,
-        moon: result.moon,
-        insights: {
-            love: {
-                score: dailyScores.loveScore,
-                insight: result.insights.love.insight,
-                reason: result.insights.love.reason,
-            },
-            career: {
-                score: dailyScores.careerScore,
-                insight: result.insights.career.insight,
-                reason: result.insights.career.reason,
-            },
-            health: {
-                score: dailyScores.healthScore,
-                insight: result.insights.health.insight,
-                reason: result.insights.health.reason,
-            },
-            mood: {
-                score: dailyScores.moodScore,
-                insight: result.insights.mood.insight,
-                reason: result.insights.mood.reason,
-            },
-            overall: {
-                score: dailyScores.overallScore,
-                insight: result.insights.overall.insight,
-                reason: result.insights.overall.reason,
-            },
-        },
-        opportunity: result.opportunity,
-        watchOut: result.watchOut,
-        deepInsight: result.deepInsight,
-        debug: {
-            context: analysis.context,
-            atmosphere: analysis.atmosphere,
-            moon: analysis.moon,
-            observations: analysis.observations,
-        },
-        rawResponse: getLLMJson(text),
-        rawInput: prompt,
+    const usage = {
+        requestId: response.responseId ?? "",
+        provider: "google",
+        model: MODEL,
+        input: prompt,
+        output: text,
+        inputTokens,
+        outputTokens,
+        totalTokens: response.usageMetadata?.totalTokenCount ?? inputTokens + outputTokens,
+        latencyMs: Date.now() - startedAt,
+        cost:
+            (inputTokens / 1_000_000) * PRICE_PER_MILLION.input + (outputTokens / 1_000_000) * PRICE_PER_MILLION.output,
+        error: null as string | null,
     };
-}
 
-/* ============================================================
-   GENERATE PLANET INTERPRETATIONS
-============================================================ */
-
-export function buildPlanetPrompt(input: {
-    planets: PlanetWeight[];
-    sunSign: string;
-    moonSign: string;
-    language: string;
-}) {
-    const bodies = input.planets
-        .map((planet) => {
-            const profile = PLANET_PROFILES[planet.name];
-
-            /**
-             * Orb and strength are here so the model can tell an aspect 0.2° from exact
-             * apart from one about to leave orb. Flattened to text they read identically,
-             * yet only one of them is worth calling today's dominant influence.
-             */
-            const contacts =
-                planet.contacts.length > 0
-                    ? planet.contacts
-                          .map(
-                              (contact) =>
-                                  `  - id: ${contact.id} | ${contact.reason} | "${
-                                      contact.title
-                                  }" | orb ${contact.orb.toFixed(1)}°, exactness ${Math.round(
-                                      contact.strength * 100
-                                  )}%, ${contact.value >= 0 ? "supportive" : "difficult"}`
-                          )
-                          .join("\n")
-                    : "  - none — this body makes no contact with the chart today";
-
-            return `
-${profile.displayName} (id: ${planet.name})
-Weight today: ${planet.score}/100, from ${planet.aspects} aspect${planet.aspects === 1 ? "" : "s"}
-Meaning: ${profile.description}
-Keywords: ${profile.keywords.join(", ")}
-Today's contacts:
-${contacts}`;
-        })
-        .join("\n");
-
-    return `
-You are writing the planetary insights for a premium daily astrology application.
-
-Your audience is intelligent, curious people who may know little or nothing about astrology.
-
-Your job is NOT to explain astrology.
-Your job is to explain what today's planetary influences are most likely to feel like in everyday life.
-
-==================================================
-HOW TO READ THE WEIGHT
-==================================================
-
-Each body carries a score from 0–100 describing how active it is TODAY in this person's chart.
-
-The score measures importance, not positivity.
-
-A high score simply means this planet has a strong influence today.
-
-Supportive contacts usually indicate opportunities.
-
-Challenging contacts usually indicate pressure, friction or situations requiring more awareness.
-
-A score near zero means this planet is largely inactive today.
-
-Never mention the score.
-Never mention numbers.
-
-==================================================
-HOW TO READ THE CONTACTS
-==================================================
-
-Every contact carries an orb and an exactness percentage.
-
-Exactness describes how precisely the contact lands today.
-
-High exactness (roughly 80–100%) means the influence is at its peak right now.
-Write about it as something clearly present today.
-
-Medium exactness (roughly 40–80%) means it is building or fading.
-Write about it as a background influence rather than the main event.
-
-Low exactness (below roughly 40%) means it is barely in effect.
-Mention it only if nothing else is happening for that body.
-
-When one body has several contacts, let the most exact one lead the description,
-and use the others only where they genuinely change the picture.
-
-The exactness is also what paragraph 2 of "reason" is about: it explains why today
-specifically, rather than any other day of the week.
-
-Never state the orb or the percentage. Translate them into how present the
-influence feels.
-
-Each contact is listed as:
-
-  id | English label | "English title" | orb, exactness, direction
-
-You must return a translated label and title for every contact — see OUTPUT.
-
-==================================================
-TODAY'S PLANETS
-==================================================
-
-${bodies}
-
-==================================================
-USER CONTEXT
-==================================================
-
-Sun sign: ${input.sunSign}
-Moon sign: ${input.moonSign}
-
-Do not mention the user's Sun sign or Moon sign.
-
-==================================================
-WRITING STYLE
-==================================================
-
-Write like an experienced journalist for a premium lifestyle magazine.
-
-Do NOT write like an astrologer.
-
-Avoid:
-
-- mystical language
-- spiritual clichés
-- motivational clichés
-- therapy language
-- fortune telling
-- exaggerated certainty
-- dramatic predictions
-- the words "energy", "vibration", "vibes", "destiny", "fate"
-
-Write naturally and intelligently.
-
-Everything should feel grounded in real life.
-
-Use language like:
-
-- may
-- can
-- is more likely
-- today tends to
-- you might notice
-- it becomes easier
-- it may feel
-
-Never promise outcomes.
-
-==================================================
-EXPLAIN EVERYTHING
-==================================================
-
-Assume the reader knows absolutely nothing about astrology.
-
-Never expect them to understand what Mercury, Venus or Saturn represent.
-
-Instead, translate planetary symbolism into ordinary human experience.
-
-Every explanation should answer these questions:
-
-1. What is this planet likely to bring into today?
-2. How might the reader actually notice it?
-3. Which parts of everyday life could it influence?
-4. Why is today's influence stronger or weaker than usual?
-
-If any of these questions is missing, the explanation is incomplete.
-
-==================================================
-BE CONCRETE
-==================================================
-
-Always describe situations that people recognize.
-
-Examples include:
-
-- conversations
-- work
-- relationships
-- family
-- study
-- money
-- planning
-- creativity
-- travel
-- routines
-- emotions
-- confidence
-- responsibilities
-- decisions
-- rest
-- health habits
-- communication
-
-Avoid vague statements.
-
-Instead of:
-
-"Mercury supports communication."
-
-Write something like:
-
-"Conversations may move faster than usual today. Small misunderstandings can quickly grow into larger issues, but honest discussion is also more likely to clear the air. This is a good day to ask questions instead of making assumptions."
-
-Instead of:
-
-"Venus affects relationships."
-
-Write something like:
-
-"You may become more aware of how balanced your relationships feel. Small gestures of appreciation can have a stronger impact than usual, while unresolved tension may be harder to ignore."
-
-The reader should finish every paragraph thinking:
-
-"I understand what this could actually look like today."
-
-==================================================
-USE TODAY'S CONTACTS
-==================================================
-
-Today's contacts explain WHY the planet has today's influence.
-
-Never simply repeat or rename the aspects.
-
-Translate them into everyday language.
-
-Instead of:
-
-"Mercury trines Jupiter."
-
-Write:
-
-"Learning, planning and exchanging ideas may feel easier today because curiosity and confidence work well together."
-
-Instead of:
-
-"Venus squares Saturn."
-
-Write:
-
-"Relationships may require extra patience today. Responsibilities or past disappointments can make affection feel more difficult to express, even when good intentions are there."
-
-Never list aspects.
-
-Always explain what they create.
-
-==================================================
-AVOID REPETITION
-==================================================
-
-Every planet should feel unique.
-
-Do not repeat sentence structures.
-
-Do not repeat vocabulary.
-
-Do not repeat examples.
-
-Different planets should focus on different parts of life whenever appropriate.
-
-Two descriptions should never feel interchangeable.
-
-==================================================
-LOW WEIGHT
-==================================================
-
-If a planet has little or no influence today, do not invent meaning.
-
-Simply explain that this area of life is unlikely to demand much attention and is expected to remain in the background today.
-
-Keep the same paragraph structure, but write it short. Two brief paragraphs are enough.
-
-==================================================
-PARAGRAPH STRUCTURE
-==================================================
-
-Never return one long block of text.
-
-Both "description" and "reason" must be split into paragraphs.
-
-Separate paragraphs with one blank line (\\n\\n).
-
-Do not use markdown, headings, bullet points, numbering or labels.
-
-Each paragraph is plain prose and must be able to stand on its own.
-
-Every paragraph has one job. Do not merge two jobs into one paragraph, and do not
-repeat a job across two paragraphs.
-
---------------------------------------------------
-"description" — exactly 3 paragraphs
---------------------------------------------------
-
-Paragraph 1 — WHAT TODAY BRINGS
-
-Name the shift this planet creates today, in plain language.
-
-2–3 sentences. No examples yet.
-
-Paragraph 2 — HOW YOU MIGHT NOTICE IT
-
-Concrete everyday situations: conversations, work, money, plans, people, routines.
-
-This is the most specific paragraph. 2–4 sentences.
-
-Paragraph 3 — WHAT HELPS
-
-One practical way to handle today's influence well.
-
-1–2 sentences. Never a motivational slogan, never a promise.
-
---------------------------------------------------
-"reason" — exactly 2 paragraphs
---------------------------------------------------
-
-Paragraph 1 — WHAT IS DRIVING IT
-
-Translate today's contacts into everyday cause and effect.
-
-Describe which two forces are meeting and what that combination produces.
-
-Never name the aspects. 2–3 sentences.
-
-Paragraph 2 — WHY TODAY
-
-Explain why this influence is stronger or weaker than usual: how close and exact
-today's contacts are, how many of them there are, and whether this is a passing
-mood or a slower background pressure.
-
-2–3 sentences.
-
-==================================================
-OUTPUT
-==================================================
-
-Return ONLY valid JSON.
-
-{
-  "planets": [
-    {
-      "name": "sun",
-      "description": "string",
-      "reason": "string",
-      "contacts": [
-        {
-          "id": "string",
-          "label": "string",
-          "title": "string"
-        }
-      ]
+    const raw = parseLLMJson<unknown>(text);
+    const parsed = raw === null ? null : answerSchema.safeParse(raw);
+
+    if (!parsed?.success) {
+        /**
+         * The merged prompt returns a large object, so the usual cause is a truncated
+         * answer — but not always, and `finishReason` alone cannot tell those apart:
+         * `STOP` means the model finished and the fault is on this side of the wire.
+         */
+        const issue = parsed?.error.issues[0];
+
+        const reason = text.trim()
+            ? issue
+                ? `answer does not match the schema at "${issue.path.join(".")}": ${issue.message}`
+                : "answer could not be parsed as JSON"
+            : "model returned no text";
+
+        return {
+            content: null,
+            usage: {
+                ...usage,
+                output: getLLMJson(text),
+                error: `${reason} (finishReason: ${response.candidates?.[0]?.finishReason ?? "unknown"}, ${text.length} chars)`,
+            },
+        };
     }
-  ]
-}
 
-Requirements:
-
-- Return exactly one object for every planet listed above.
-- Preserve the exact order.
-- Use the exact id as "name".
-- Never invent or return the score.
-- Never invent contacts. Return exactly the ones listed for that body, in the same
-  order, and copy each "id" character for character.
-- If a body has no contacts, return an empty "contacts" array.
-- Never invent or return the orb, the exactness or the direction.
-
-The following four rules apply to "description" and "reason" only.
-They do NOT apply to "contacts", which is a technical label shown separately:
-
-- Never mention astrology jargon.
-- Never mention aspects by name.
-- Never mention zodiac signs.
-- Never explain general astrology.
-
-"description"
-
-Exactly 3 paragraphs, separated by a blank line, following PARAGRAPH STRUCTURE above.
-
-600–1000 characters in total.
-
-Focus entirely on TODAY.
-
-"reason"
-
-Exactly 2 paragraphs, separated by a blank line, following PARAGRAPH STRUCTURE above.
-
-350–650 characters in total.
-
-Base your explanation on today's contacts, but translate them into plain, everyday language.
-
-Help the reader understand the mechanism behind today's influence without using astrological terminology.
-
-"contacts"
-
-This is the ONE place where astrological terminology is required.
-
-It is a technical label displayed next to the numbers, not prose, and the reader
-sees it as a caption rather than as part of the text.
-
-"label"
-
-Translate the English label into the target language, keeping it a plain
-transit-to-natal statement.
-
-Use the established astrological vocabulary of that language for the planets and
-the aspect — the wording an astrology app in that language would print.
-
-Keep the structure of the original: which body is transiting, which aspect it makes,
-and which natal point it makes it to. Do not interpret, shorten or embellish it.
-
-"title"
-
-Translate the English title into the target language.
-
-It is a short headline, so keep it short — never longer than the original, and never
-a sentence. Keep its tone: it names what the contact does, without drama.
-
-Return only JSON.
-
-Before returning, verify that every "description" contains two blank lines and every
-"reason" contains one. If a field is a single block of text, rewrite it.
-
-Also verify that every contact id you returned appears in the list above, and that
-none is missing.
-
-Respond only in:
-${input.language}.
-`;
-}
-
-/**
- * Interpretations for the planetary panel.
- *
- * Deliberately its own request with its own compact prompt: the scores are available
- * the moment a day is scored, and this text is only worth generating when someone
- * actually opens the panel. Folding it into the horoscope prompt would have made
- * every daily insight pay for ten extra interpretations.
- */
-export async function generatePlanetInsights(input: {
-    /** Per-body weights from the engine. The model interprets them, never rescores them. */
-    planets: PlanetWeight[];
-    sunSign: string;
-    moonSign: string;
-    languageIso: string;
-}): Promise<{ planets: DailyPlanetInsight[]; rawResponse: string; rawInput: string }> {
-    const language = getLanguageByIso(input.languageIso);
-
-    const prompt = buildPlanetPrompt({
-        planets: input.planets,
-        sunSign: input.sunSign,
-        moonSign: input.moonSign,
-        language: language ? buildPromptLanguageRule(language) : input.languageIso,
-    });
-
-    const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-        },
-    });
-
-    const text = response.text ?? "";
-
-    const result = parseLLMJson<{ planets: DailyPlanetInsight[] }>(text);
-
-    if (!result) {
-        throw new Error("Failed to parse planet interpretation response");
-    }
+    const result = parsed.data;
 
     return {
-        /**
-         * Merged by name rather than by position: score, weight and aspect count stay
-         * the engine's, and a body the model skipped or renamed still comes back with
-         * its numbers, falling back to the profile text and the deterministic contacts.
-         */
-        planets: input.planets.map((planet) => {
-            const written = result.planets?.find((entry) => entry.name === planet.name);
+        usage: { ...usage, output: getLLMJson(text) },
+        content: {
+            overview: result.overview,
+            // Paragraphs are split here so no screen has to parse "\n".
+            deepInsight: result.deepInsight
+                .split(/\n\s*\n/u)
+                .map((paragraph) => paragraph.trim())
+                .filter(Boolean),
+            moon: { insight: result.moon.insight, reason: result.moon.reason },
+            opportunity: result.opportunity,
+            watchOut: result.watchOut,
+            insights: {
+                love: { insight: result.insights.love.insight, reason: result.insights.love.reason },
+                career: { insight: result.insights.career.insight, reason: result.insights.career.reason },
+                health: { insight: result.insights.health.insight, reason: result.insights.health.reason },
+                mood: { insight: result.insights.mood.insight, reason: result.insights.mood.reason },
+                overall: { insight: result.insights.overall.insight, reason: result.insights.overall.reason },
+            },
+            /**
+             * Driven by the engine's list, not the model's: a body or contact the model
+             * dropped, duplicated or renamed still gets an entry, falling back to the
+             * English wording rather than disappearing from the panel.
+             */
+            planets: input.planets.map((planet) => {
+                const written = result.planets?.find((entry) => entry.name === planet.name);
 
-            return {
-                name: planet.name,
-                score: planet.score,
-                weight: planet.weight,
-                aspects: planet.aspects,
-                description: written?.description ?? PLANET_PROFILES[planet.name].description,
-                reason: written?.reason ?? planet.contacts.map((contact) => contact.reason).join(", "),
-                /**
-                 * Driven by the engine's list, not the model's: a contact the model
-                 * dropped, duplicated or renamed still gets a row, falling back to the
-                 * English wording rather than disappearing from the panel.
-                 */
-                contacts: planet.contacts.map((contact) => {
-                    const translated = written?.contacts?.find((entry) => entry.id === contact.id);
-
-                    return {
-                        id: contact.id,
-                        label: translated?.label ?? contact.reason,
-                        title: translated?.title ?? contact.title,
-                    };
-                }),
-            };
-        }),
-        rawResponse: getLLMJson(text),
-        rawInput: prompt,
+                return {
+                    name: planet.name,
+                    description: written?.description ?? PLANET_PROFILES[planet.name].description,
+                    reason: written?.reason ?? planet.contacts.map((contact) => contact.reason).join(", "),
+                    contacts: Object.fromEntries(
+                        planet.contacts.map((contact) => [
+                            contact.id,
+                            {
+                                id: contact.id,
+                                title:
+                                    written?.contacts?.find((entry) => entry.id === contact.id)?.title ?? contact.title,
+                            },
+                        ])
+                    ),
+                };
+            }),
+        },
     };
 }
 

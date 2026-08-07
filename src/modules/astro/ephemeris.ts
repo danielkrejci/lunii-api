@@ -182,7 +182,17 @@ export function computeTransitChart(at: Date): TransitChart {
     return chart;
 }
 
-/** Midnight UTC for a "YYYY-MM-DD" date — the shared sampling instant for daily scores. */
-export function transitInstantForDate(date: string): Date {
-    return dayjs.utc(date).startOf("day").toDate();
+/**
+ * Local noon of a "YYYY-MM-DD" date in a zone — the sampling instant for daily scores.
+ *
+ * Noon rather than midnight because it is the middle of the day being described, so the
+ * fastest body, the Moon, is never more than twelve hours of motion away from any hour
+ * the user might be reading about.
+ */
+export function transitInstantForDate(date: string, utcOffsetMinutes: number): Date {
+    return dayjs
+        .utc(date)
+        .startOf("day")
+        .add(12 * 60 - utcOffsetMinutes, "minute")
+        .toDate();
 }

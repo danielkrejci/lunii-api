@@ -1,13 +1,12 @@
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
-import { eq } from "drizzle-orm";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { transit } from "../db/schema";
 import { auth } from "../lib/auth";
+import { getOrCreateTransits } from "../modules/dailyScore/service";
 
 dayjs.extend(utc);
 
@@ -71,22 +70,19 @@ export default (async (fastify) => {
             }
 
             try {
-                const data = await fastify.db.select().from(transit).where(eq(transit.date, request.query.date));
-
-                if (!data) {
-                    return reply.status(409).send({
-                        error: {
-                            code: "transit_not_found",
-                            message: "No transits found for this date",
-                        },
-                    });
-                }
+                // Transits are stored per zone, so the row is picked by the caller's own —
+                // selecting on the date alone would now return one row per offset.
+                const data = await getOrCreateTransits(
+                    fastify.db,
+                    request.query.date,
+                    session.profile?.timezone ?? null
+                );
 
                 return reply.status(200).send({
                     data: {
-                        date: data[0].date,
-                        planets: data[0].planets,
-                        aspects: data[0].aspects,
+                        date: request.query.date,
+                        planets: data.planets,
+                        aspects: data.aspects,
                     },
                 });
             } catch (error: unknown) {

@@ -1,16 +1,18 @@
+import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
+import { aiGenerations, compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { NatalChart } from "../../../modules/astro";
 import { generateDailyOverview } from "../../../modules/compatibilityPeople/ai";
 import { calculateDailyCompatibility } from "../../../modules/compatibilityPeople/aspects";
 import { normalizeScore, OVERALL_NORMALIZER } from "../../../modules/compatibilityPeople/normalizer";
+import { INSIGHT_DIRECTIONS, RELATIONSHIP_CATEGORIES } from "../../../modules/compatibilityPeople/types";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { serializeDrizzleData } from "../../../utils/drizzleUtils";
 import { Genders, Relationships, SINGS_MAP } from "../../../utils/natalUtils";
@@ -32,8 +34,10 @@ const overviewBlock = z.object({
  * Shared by the read and the generate route so a generate response can go straight
  * into the client's query cache without a refetch.
  *
- * The compatibility score is deterministic and always present. Only the written
- * parts are nullable, because they cost an AI request.
+ * Everything above `content` is deterministic and always present. `content` is the
+ * AI-written half and is all-or-nothing, so `status` alone narrows every field inside
+ * it. `absent` never reaches the client: the read claims the generation before it
+ * answers.
  */
 const responseSchema = z.object({
     data: z.object({
@@ -53,23 +57,33 @@ const responseSchema = z.object({
         compatibility: z.any(),
         score: z.number(),
         date: z.string(),
-        /** False while the written fields are still null. */
-        generated: z.boolean(),
-        overview: z.string().nullable(),
-        positiveOverview: overviewBlock.nullable(),
-        negativeOverview: overviewBlock.nullable(),
-        insights: z
-            .array(
-                z.object({
-                    title: z.string(),
-                    description: z.string(),
-                    reason: z.string(),
-                    category: z.string(),
-                    direction: z.string(),
-                })
-            )
-            .nullable(),
-        practicalAdvice: z.string().nullable(),
+        content: z.discriminatedUnion("status", [
+            z.object({ status: z.literal("pending"), data: z.null(), error: z.null() }),
+            z.object({
+                status: z.literal("failed"),
+                data: z.null(),
+                error: z.object({ code: z.string(), message: z.string() }),
+            }),
+            z.object({
+                status: z.literal("ready"),
+                data: z.object({
+                    overview: z.string(),
+                    positiveOverview: overviewBlock,
+                    negativeOverview: overviewBlock,
+                    insights: z.array(
+                        z.object({
+                            title: z.string(),
+                            description: z.string(),
+                            reason: z.string(),
+                            category: z.enum(RELATIONSHIP_CATEGORIES),
+                            direction: z.enum(INSIGHT_DIRECTIONS),
+                        })
+                    ),
+                    practicalAdvice: z.string(),
+                }),
+                error: z.null(),
+            }),
+        ]),
     }),
 });
 
@@ -93,11 +107,8 @@ function loadPerson(db: FastifyInstance["db"], input: { userId: string; personId
                 baseScore: compatibilityPeople.baseScore,
                 score: compatibilityPeopleScores.score,
                 compatibility: compatibilityPeopleScores.compatibility,
-                overview: compatibilityPeopleScores.overview,
-                positiveOverview: compatibilityPeopleScores.positiveOverview,
-                negativeOverview: compatibilityPeopleScores.negativeOverview,
-                insights: compatibilityPeopleScores.insights,
-                practicalAdvice: compatibilityPeopleScores.practicalAdvice,
+                content: compatibilityPeopleScores.content,
+                status: compatibilityPeopleScores.status,
                 date: compatibilityPeopleScores.date,
             })
             .from(compatibilityPeople)
@@ -131,7 +142,7 @@ type Person = PersonRow & { score: number; compatibility: NonNullable<PersonRow[
  */
 async function loadPersonWithScore(
     db: FastifyInstance["db"],
-    input: { userId: string; personId: string; date: string; userChart: NatalChart }
+    input: { userId: string; personId: string; date: string; userChart: NatalChart; timezone: string | null }
 ): Promise<Person | null> {
     const person = await loadPerson(db, input);
 
@@ -143,7 +154,7 @@ async function loadPersonWithScore(
         return person as Person;
     }
 
-    const { planets } = await getOrCreateTransits(db, input.date);
+    const { planets } = await getOrCreateTransits(db, input.date, input.timezone);
 
     const compatibility = calculateDailyCompatibility(planets, input.userChart, person.birthChart);
     const overallRaw = person.baseCompatibility.overall + compatibility.modifier;
@@ -183,13 +194,151 @@ function toResponse(person: Person, date: string) {
         compatibility: person.compatibility,
         score: person.score,
         date,
-        generated: Boolean(person.overview),
-        overview: person.overview ?? null,
-        positiveOverview: person.positiveOverview ?? null,
-        negativeOverview: person.negativeOverview ?? null,
-        insights: person.insights ?? null,
-        practicalAdvice: person.practicalAdvice ?? null,
+        content:
+            person.status === "ready" && person.content
+                ? { status: "ready" as const, data: person.content, error: null }
+                : person.status === "failed"
+                  ? {
+                        status: "failed" as const,
+                        data: null,
+                        error: { code: "generation_failed", message: "Writing this reading failed." },
+                    }
+                  : { status: "pending" as const, data: null, error: null },
     });
+}
+
+/**
+ * Claims the day for this person and, if the claim succeeds, writes the reading.
+ *
+ * Same shape as the daily insight: one statement decides who pays for the model, the
+ * work itself runs detached, and every write carries the claimed timestamp so a run
+ * whose row has moved on cannot overwrite it. The key is (person, date) rather than
+ * (user, date) — ownership was already checked by the caller.
+ */
+async function generate(
+    fastify: FastifyInstance,
+    input: {
+        person: Person;
+        profile: NonNullable<NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>["profile"]>;
+        date: string;
+        allowFailed: boolean;
+    }
+): Promise<void> {
+    const { person, profile, date } = input;
+
+    const [claimed] = await fastify.db
+        .update(compatibilityPeopleScores)
+        // Milliseconds, because the timestamp has to survive a round trip through a JS
+        // `Date`; full `now()` precision would come back short and match no row.
+        .set({ status: "pending", updatedAt: sql`date_trunc('milliseconds', now())` })
+        .where(
+            and(
+                eq(compatibilityPeopleScores.personId, person.id),
+                eq(compatibilityPeopleScores.date, date),
+                isNull(compatibilityPeopleScores.content),
+                or(
+                    eq(compatibilityPeopleScores.status, "absent"),
+                    input.allowFailed ? eq(compatibilityPeopleScores.status, "failed") : sql`false`,
+                    and(
+                        eq(compatibilityPeopleScores.status, "pending"),
+                        lt(compatibilityPeopleScores.updatedAt, sql`now() - interval '5 minutes'`)
+                    )
+                )
+            )
+        )
+        .returning({ updatedAt: compatibilityPeopleScores.updatedAt });
+
+    if (!claimed) {
+        return;
+    }
+
+    void (async () => {
+        const owned = and(
+            eq(compatibilityPeopleScores.personId, person.id),
+            eq(compatibilityPeopleScores.date, date),
+            eq(compatibilityPeopleScores.updatedAt, claimed.updatedAt)
+        );
+
+        // One retry: most failures here are a timeout or a rate limit rather than
+        // anything a second attempt would hit again.
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            const { content, usage } = await generateDailyOverview(profile.language, {
+                score: person.score,
+                modifier: person.compatibility.modifier,
+
+                positiveTotal: person.compatibility.positiveOverall,
+                negativeTotal: person.compatibility.negativeOverall,
+
+                breakdown: person.compatibility.overallBreakdown,
+
+                positiveAspects: person.compatibility.positiveAspects.map(({ rule, score }) => ({
+                    title: rule.title,
+                    description: rule.description,
+                    category: rule.category,
+                    planetA: rule.planetA,
+                    planetB: rule.planetB,
+                    score,
+                })),
+                negativeAspects: person.compatibility.negativeAspects.map(({ rule, score }) => ({
+                    title: rule.title,
+                    description: rule.description,
+                    category: rule.category,
+                    planetA: rule.planetA,
+                    planetB: rule.planetB,
+                    score,
+                })),
+
+                relationshipType: person.relationship,
+
+                personA: { name: profile.name, gender: profile.gender, sunSign: profile.sunSign },
+                personB: { name: person.name, gender: person.gender, sunSign: person.sign },
+            });
+
+            await fastify.db
+                .insert(aiGenerations)
+                .values({
+                    userId: profile.userId,
+                    type: "compatibilityPeople",
+                    status: content ? "success" : "error",
+                    error: usage.error,
+                    requestId: usage.requestId,
+                    provider: usage.provider,
+                    model: usage.model,
+                    input: usage.input,
+                    output: usage.output,
+                    inputTokens: usage.inputTokens,
+                    outputTokens: usage.outputTokens,
+                    total_tokens: usage.totalTokens,
+                    latencyMs: usage.latencyMs,
+                    cost: usage.cost,
+                })
+                .catch((error: unknown) =>
+                    fastify.log.error({ err: error, personId: person.id, date }, "Failed to log AI generation")
+                );
+
+            if (content) {
+                const written = await fastify.db
+                    .update(compatibilityPeopleScores)
+                    .set({ content, status: "ready", updatedAt: sql`date_trunc('milliseconds', now())` })
+                    .where(owned)
+                    .returning({ date: compatibilityPeopleScores.date });
+
+                if (written.length === 0) {
+                    fastify.log.warn(
+                        { personId: person.id, date },
+                        "Generated reading discarded, the row had moved on"
+                    );
+                }
+
+                return;
+            }
+        }
+
+        await fastify.db
+            .update(compatibilityPeopleScores)
+            .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
+            .where(owned);
+    })().catch((error: unknown) => fastify.log.error({ err: error, personId: person.id, date }, "Generation crashed"));
 }
 
 const notFound = {
@@ -200,6 +349,34 @@ const notFound = {
 };
 
 export default (async (fastify) => {
+    /**
+     * Registered for this plugin but off by default, so only the generate route carries
+     * it — reading a person must stay free. Keyed by person so one noisy relationship
+     * cannot lock the others out.
+     */
+    await fastify.register(rateLimit, {
+        global: false,
+        keyGenerator: async (request) => {
+            const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+            const personId = (request.body as { compatibilityPersonId?: string } | undefined)?.compatibilityPersonId;
+
+            return `${session?.user?.id ?? request.ip}:${personId ?? ""}`;
+        },
+        errorResponseBuilder: (_request, context) => {
+            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
+
+            return {
+                statusCode: 429,
+                error: {
+                    hours: Math.floor(totalSeconds / 3600),
+                    minutes: Math.floor((totalSeconds % 3600) / 60),
+                    message: "You've reached the limit for now. Please try again later.",
+                    silent: true,
+                },
+            };
+        },
+    });
+
     /* ============================================================
        READ — safe to prefetch, retry and refetch
     ============================================================ */
@@ -244,10 +421,27 @@ export default (async (fastify) => {
                     personId: request.query.compatibilityPersonId,
                     date,
                     userChart: session.profile.birthChart,
+                    timezone: session.profile.timezone,
                 });
 
                 if (!person) {
                     return reply.status(404).send(notFound);
+                }
+
+                /**
+                 * The one side effect of this route: opening a person's detail starts
+                 * their reading. The list never comes here, so nobody pays for a person
+                 * whose detail is never opened. Repeated reads change nothing — the claim
+                 * only fires while the day has no content and no live run, and a failed
+                 * one is left for the explicit retry.
+                 */
+                if (!person.content) {
+                    await generate(fastify, {
+                        person,
+                        profile: session.profile,
+                        date,
+                        allowFailed: false,
+                    });
                 }
 
                 return reply.status(200).send({ data: toResponse(person, date) });
@@ -274,13 +468,19 @@ export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/detail/generate",
         {
+            /**
+             * The only endpoint here that spends money on demand. Keyed per person, not
+             * per user: three an hour covers a real failure worth retrying, and someone
+             * with ten people must not exhaust the budget of the other nine.
+             */
+            config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
             schema: {
                 body: z.object({
                     compatibilityPersonId: z.string().min(1),
                     date: z.string().refine((date) => dayjs(date).isValid(), { message: "Date is invalid" }),
                 }),
                 response: {
-                    200: responseSchema,
+                    202: responseSchema,
                     401: errorSchema,
                     404: errorSchema,
                     409: errorSchema,
@@ -311,94 +511,29 @@ export default (async (fastify) => {
                     personId: request.body.compatibilityPersonId,
                     date,
                     userChart: session.profile.birthChart,
+                    timezone: session.profile.timezone,
                 });
 
                 if (!person) {
                     return reply.status(404).send(notFound);
                 }
 
-                // Already written: don't pay for a second overview, and don't replace text
-                // the user may already be reading.
-                if (person.overview) {
-                    return reply.status(200).send({ data: toResponse(person, date) });
-                }
-
-                const { response: dailyOverview, input: rawInput } = await generateDailyOverview(
-                    session.profile.language,
-                    {
-                        score: person.score,
-                        modifier: person.compatibility.modifier,
-
-                        positiveTotal: person.compatibility.positiveOverall,
-                        negativeTotal: person.compatibility.negativeOverall,
-
-                        breakdown: person.compatibility.overallBreakdown,
-
-                        positiveAspects: person.compatibility.positiveAspects.map(({ rule, score }) => ({
-                            title: rule.title,
-                            description: rule.description,
-                            category: rule.category,
-                            planetA: rule.planetA,
-                            planetB: rule.planetB,
-                            score,
-                        })),
-                        negativeAspects: person.compatibility.negativeAspects.map(({ rule, score }) => ({
-                            title: rule.title,
-                            description: rule.description,
-                            category: rule.category,
-                            planetA: rule.planetA,
-                            planetB: rule.planetB,
-                            score,
-                        })),
-
-                        relationshipType: person.relationship,
-
-                        personA: {
-                            name: session.profile.name,
-                            gender: session.profile.gender,
-                            sunSign: session.profile.sunSign,
-                        },
-
-                        personB: {
-                            name: person.name,
-                            gender: person.gender,
-                            sunSign: person.sign,
-                        },
-                    }
-                );
-
                 /**
-                 * Conditional on purpose. Two concurrent generates both reach here, and
-                 * whichever lands second must not overwrite text the user is already
-                 * reading with an equally valid but different wording.
+                 * Retry after a failure — the one path allowed to claim a `failed` day.
+                 * Claimed before the response is built, so the client is told `pending`
+                 * and starts polling instead of reading back the failure it just retried.
                  */
-                await fastify.db
-                    .update(compatibilityPeopleScores)
-                    .set({
-                        overview: dailyOverview.overview,
-                        positiveOverview: dailyOverview.positiveOverview,
-                        negativeOverview: dailyOverview.negativeOverview,
-                        insights: dailyOverview.insights,
-                        practicalAdvice: dailyOverview.practicalAdvice,
-                        rawInput,
-                    })
-                    .where(
-                        and(
-                            eq(compatibilityPeopleScores.personId, person.id),
-                            eq(compatibilityPeopleScores.date, date),
-                            isNull(compatibilityPeopleScores.overview)
-                        )
-                    );
+                await generate(fastify, { person, profile: session.profile, date, allowFailed: true });
 
-                // Re-read so a request that lost the race serves the winner's text.
-                const written = await loadPersonWithScore(fastify.db, {
+                const claimed = await loadPersonWithScore(fastify.db, {
                     userId: session.user.id,
                     personId: request.body.compatibilityPersonId,
                     date,
                     userChart: session.profile.birthChart,
+                    timezone: session.profile.timezone,
                 });
 
-                return reply.status(200).send({ data: toResponse(written ?? person, date) });
+                return reply.status(202).send({ data: toResponse(claimed ?? person, date) });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 
