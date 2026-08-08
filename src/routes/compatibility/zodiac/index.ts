@@ -87,7 +87,7 @@ export default (async (fastify) => {
                 const transits = await getOrCreateTransits(fastify.db, request.query.date, session.profile.timezone);
 
                 const result = SINGS_MAP.map((sign) => {
-                    const compatibility = calculateDailyCompatibility(sign, session.profile.sunSign, transits.planets);
+                    const compatibility = calculateDailyCompatibility(sign, session.profile!.sunSign, transits.planets);
                     console.log({
                         sign,
                         rawScore: compatibility.rawScore,

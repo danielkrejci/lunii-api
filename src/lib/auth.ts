@@ -9,7 +9,6 @@ import { db } from "../db";
 import * as schema from "../db/schema";
 import { account, profile } from "../db/schema";
 import { env } from "../env";
-import { serializeDrizzleData } from "../utils/drizzleUtils";
 
 export async function generateAppleClientSecret() {
     const key = await importPKCS8(env.APPLE_PRIVATE_KEY, "ES256");
@@ -54,21 +53,9 @@ const config = {
                     .select()
                     .from(schema.profile)
                     .where(eq(profile.userId, sessionUser.id))
-                    .orderBy(desc(profile.createdAt))
-                    .limit(1);
+                    .orderBy(desc(profile.createdAt));
 
-                console.log("profileData", profileData);
-
-                if (profileData.length === 0) {
-                    return {
-                        user: sessionUser,
-                        session,
-                        profile: null,
-                        accounts: [],
-                    };
-                }
-
-                const accounts = await db
+                const accountsData = await db
                     .select({
                         id: account.id,
                         accountId: account.id,
@@ -79,11 +66,20 @@ const config = {
                     .from(account)
                     .where(eq(account.userId, sessionUser.id));
 
+                if (profileData.length === 0) {
+                    return {
+                        user: sessionUser,
+                        session,
+                        profile: null,
+                        accounts: accountsData,
+                    };
+                }
+
                 return {
                     user: sessionUser,
                     session,
-                    profile: serializeDrizzleData(profileData[0]),
-                    accounts,
+                    profile: profileData.at(0),
+                    accounts: accountsData,
                 };
             } catch (error) {
                 console.error("customSession: failed to load profile", error);
