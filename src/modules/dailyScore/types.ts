@@ -93,6 +93,14 @@ export interface Impact {
     reason: string;
 
     title: string;
+
+    /**
+     * The rule's sentence about what this contact does. Carried through from the rule
+     * because the prompt is the only consumer that needs it and it is the only text in
+     * the personal half of that prompt — without it the reader's own transits arrive as
+     * bare aspect names next to whole paragraphs about the generic sky.
+     */
+    description: string;
 }
 
 /* ============================================================
@@ -148,6 +156,30 @@ export interface PlanetContact {
     value: number;
 
     title: string;
+
+    /** The rule's sentence about what this contact does. See `Impact.description`. */
+    description: string;
+}
+
+/**
+ * One contact as the client sees it: the same aspect with the engine's internals
+ * dropped and the display numbers already rounded.
+ *
+ * Shared by every endpoint that shows aspects, so the daily horoscope's planetary
+ * panel and the Moon screen cannot drift into two shapes the app has to tell apart.
+ */
+export interface ContactSummary {
+    /** "neptune_trine_moon" — the join key for the written half, and a stable React key. */
+    id: string;
+    transit: Planet;
+    natal: NatalPoint;
+    aspect: AspectType;
+    /** Degrees from exact, one decimal. */
+    orb: number;
+    /** 0–100. How precisely the aspect lands today. */
+    exactness: number;
+    /** Supportive or difficult, from the signed contribution. */
+    supportive: boolean;
 }
 
 /**

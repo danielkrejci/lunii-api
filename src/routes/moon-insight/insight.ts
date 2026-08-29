@@ -2,92 +2,83 @@ import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
-import { and, asc, between, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { aiGenerations, dailyInsights, profile as profileTable } from "../../db/schema";
+import { aiGenerations, dailyInsights, moonInsights, profile as profileTable } from "../../db/schema";
 import { auth } from "../../lib/auth";
-import { MOON_PHASES, PLANETS } from "../../modules/astro";
+import { MOON_PHASES, TransitChart } from "../../modules/astro";
 import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyScore";
-import {
-    backfillScoresForUser,
-    getDailyScore as getOrCreateDailyScore,
-    getOrCreateTransits,
-    ScoringProfile,
-    scoreProfileForDate,
-} from "../../modules/dailyScore/service";
-import { DailyTransits, generateDailyInsight } from "../../modules/insights";
-import { elongation, moonIllumination } from "../../modules/moon";
-import { getMoonPhase } from "../../modules/transits";
-import { serializeDrizzleData } from "../../utils/drizzleUtils";
+import { getOrCreateTransits, scoreProfileForDate } from "../../modules/dailyScore/service";
+import { DailyScoreResult, PlanetContact } from "../../modules/dailyScore/types";
+import { generateMoonInsight, MoonTeaser } from "../../modules/moon/ai";
+import { describeMoonDay, MOON_VARIANTS, MoonToday } from "../../modules/moon/today";
 import { SINGS_MAP } from "../../utils/natalUtils";
 import { errorSchema } from "../../utils/zodResponse";
 
 dayjs.extend(utc);
 
-/** The window the timeline covers, and therefore the window that must be scored. */
-const TIMELINE_DAYS_BACK = 4;
-const TIMELINE_DAYS_FORWARD = 2;
+/**
+ * How many lunar contacts the screen and the prompt both get. Higher than the default
+ * three the horoscope panel uses: there the Moon is one body among ten, here it is the
+ * entire subject.
+ *
+ * One constant for both on purpose — the text is written from these aspects, so showing
+ * a different set underneath it would caption the copy with something it never saw.
+ */
+const LUNAR_CONTACT_LIMIT = 6;
+
+/** Today's transit-Moon → natal contacts, strongest first. */
+function lunarContacts(score: DailyScoreResult): PlanetContact[] {
+    return (
+        summarizePlanetInfluence(score.impacts, LUNAR_CONTACT_LIMIT).find((planet) => planet.name === "moon")
+            ?.contacts ?? []
+    );
+}
 
 /**
  * Shared by the read and the generate route on purpose: a generate response can go
  * straight into the client's query cache without a refetch.
  *
- * Everything above `content` is deterministic and always complete — it is recomputed
- * from the ephemeris on every read. `content` is the AI-written half and is
- * all-or-nothing, so `status` alone narrows every field inside it. `absent` never
- * reaches the client: the read path claims the generation before it answers.
+ * Everything above `content` is deterministic and always complete — it is recomputed from
+ * the ephemeris on every read, so the screen is never empty while the text is pending.
+ * `content` is the AI-written half and is all-or-nothing, so `status` alone narrows every
+ * field inside it. `absent` never reaches the client: the read path claims the generation
+ * before it answers.
  */
 const responseSchema = z.object({
     data: z.object({
         date: z.string(),
-        scores: z.object({
-            love: z.number(),
-            career: z.number(),
-            health: z.number(),
-            mood: z.number(),
-            overall: z.number(),
-        }),
-        timeline: z.array(
+        /** Sign the transiting Moon stands in today, not the reader's natal Moon. */
+        sign: z.enum(SINGS_MAP),
+        phase: z.enum(MOON_PHASES),
+        /** 0–100. Share of the disc lit today. */
+        illumination: z.number(),
+        /**
+         * Which layout to show, and which prompt wrote the text. Read from the stored
+         * row rather than from today's phase, so the hero can never disagree with the
+         * words underneath it.
+         */
+        variant: z.enum(MOON_VARIANTS),
+        /** Local calendar date of the event and whole days until it. Zero means today. */
+        nextFullMoon: z.object({ date: z.string(), daysRemaining: z.number() }),
+        nextNewMoon: z.object({ date: z.string(), daysRemaining: z.number() }),
+        /**
+         * The aspects today's Moon makes to the natal chart, strongest first — the same
+         * shape the daily horoscope's planetary panel uses, so the app renders both with
+         * one component. An empty array is a real answer: some days the Moon is quiet.
+         */
+        aspects: z.array(
             z.object({
-                date: z.string(),
-                isToday: z.boolean(),
-                isTomorrow: z.boolean(),
-                isYesterday: z.boolean(),
-                love: z.number(),
-                career: z.number(),
-                health: z.number(),
-                mood: z.number(),
-                overall: z.number(),
-            })
-        ),
-        moon: z.object({
-            phase: z.enum(MOON_PHASES),
-            illumination: z.number(),
-            sign: z.enum(SINGS_MAP),
-        }),
-        /** An array, not a map: the order is the answer — strongest planet first. */
-        planets: z.array(
-            z.object({
-                name: z.enum(PLANETS),
-                score: z.number(),
-                contacts: z.array(
-                    z.object({
-                        /** "neptune_trine_moon" — the join key for the written half. */
-                        id: z.string(),
-                        transit: z.string(),
-                        natal: z.string(),
-                        aspect: z.string(),
-                        /** Degrees from exact, one decimal. */
-                        orb: z.number(),
-                        /** 0–100. How precisely the aspect lands today. */
-                        exactness: z.number(),
-                        /** Supportive or difficult, from the signed contribution. */
-                        supportive: z.boolean(),
-                    })
-                ),
+                id: z.string(),
+                transit: z.string(),
+                natal: z.string(),
+                aspect: z.string(),
+                orb: z.number(),
+                exactness: z.number(),
+                supportive: z.boolean(),
             })
         ),
         content: z.discriminatedUnion("status", [
@@ -100,20 +91,26 @@ const responseSchema = z.object({
             z.object({
                 status: z.literal("ready"),
                 data: z.object({
-                    overview: z.object({ title: z.string(), description: z.string() }),
-                    /** Paragraphs. Split on the server so no screen has to parse "\n". */
-                    deepInsight: z.array(z.string()),
-                    /** The day's Moon note, as one text rather than an insight and a reason. */
-                    moon: z.object({ insight: z.string() }),
-                    opportunity: z.object({ description: z.string(), examples: z.array(z.string()) }),
-                    watchOut: z.object({ description: z.string(), examples: z.array(z.string()) }),
-                    insights: z.object({
-                        love: z.object({ insight: z.string(), reason: z.string() }),
-                        career: z.object({ insight: z.string(), reason: z.string() }),
-                        health: z.object({ insight: z.string(), reason: z.string() }),
-                        mood: z.object({ insight: z.string(), reason: z.string() }),
-                        overall: z.object({ insight: z.string(), reason: z.string() }),
-                    }),
+                    /**
+                     * The whole reading, one text. Paragraphs are separated by a blank
+                     * line and the client renders them as separate paragraphs.
+                     */
+                    insight: z.array(z.string()),
+                    contacts: z.record(
+                        z.string(),
+                        z.object({
+                            id: z.string(),
+                            title: z.string(),
+                            /** Absent on rows written before descriptions existed. */
+                            description: z.string().optional(),
+                        })
+                    ),
+                    /**
+                     * Chips, not prose: what today's Moon is and is not good for. Four
+                     * expressions each, 1–3 words. Empty arrays on rows generated before
+                     * these existed.
+                     */
+                    activities: z.object({ supported: z.array(z.string()), avoid: z.array(z.string()) }),
                 }),
                 error: z.null(),
             }),
@@ -124,9 +121,9 @@ const responseSchema = z.object({
 type ResponseData = z.infer<typeof responseSchema>["data"];
 
 /**
- * Claims the day and, if the claim succeeds, writes the horoscope. Runs detached from
- * the request that started it: the model needs 30–60 seconds and no client should hold
- * a connection open that long.
+ * Claims the day and, if the claim succeeds, writes the text. Runs detached from the
+ * request that started it: the model needs 30–60 seconds and no client should hold a
+ * connection open that long.
  *
  * The claim is a single statement on purpose — a SELECT followed by an UPDATE would let
  * two concurrent requests both start a paid generation. It fires when the day has no
@@ -147,7 +144,7 @@ async function generate(
     const { userId, date } = input;
 
     const [claimed] = await fastify.db
-        .update(dailyInsights)
+        .update(moonInsights)
         /**
          * Truncated to milliseconds because the claim timestamp has to survive a round
          * trip through a JS `Date`, which has no microseconds. Full `now()` precision
@@ -156,20 +153,20 @@ async function generate(
         .set({ status: "pending", updatedAt: sql`date_trunc('milliseconds', now())` })
         .where(
             and(
-                eq(dailyInsights.userId, userId),
-                eq(dailyInsights.date, date),
-                isNull(dailyInsights.content),
+                eq(moonInsights.userId, userId),
+                eq(moonInsights.date, date),
+                isNull(moonInsights.content),
                 or(
-                    eq(dailyInsights.status, "absent"),
-                    input.allowFailed ? eq(dailyInsights.status, "failed") : sql`false`,
+                    eq(moonInsights.status, "absent"),
+                    input.allowFailed ? eq(moonInsights.status, "failed") : sql`false`,
                     and(
-                        eq(dailyInsights.status, "pending"),
-                        lt(dailyInsights.updatedAt, sql`now() - interval '5 minutes'`)
+                        eq(moonInsights.status, "pending"),
+                        lt(moonInsights.updatedAt, sql`now() - interval '5 minutes'`)
                     )
                 )
             )
         )
-        .returning({ updatedAt: dailyInsights.updatedAt });
+        .returning({ updatedAt: moonInsights.updatedAt, variant: moonInsights.variant });
 
     if (!claimed) {
         return;
@@ -184,36 +181,67 @@ async function generate(
      */
     void (async () => {
         const owned = and(
-            eq(dailyInsights.userId, userId),
-            eq(dailyInsights.date, date),
-            eq(dailyInsights.updatedAt, claimed.updatedAt)
+            eq(moonInsights.userId, userId),
+            eq(moonInsights.date, date),
+            eq(moonInsights.updatedAt, claimed.updatedAt)
         );
 
         const transitData = await getOrCreateTransits(fastify.db, date, input.profile.timezone);
-        const score = scoreProfileForDate(input.profile, transitData.planets);
+
+        const moon = describeMoonDay({
+            date,
+            timezone: input.profile.timezone,
+            sunLongitude: transitData.planets.sun.longitude,
+            moonLongitude: transitData.planets.moon.longitude,
+            moonSign: transitData.planets.moon.sign,
+        });
+
+        const contacts = lunarContacts(scoreProfileForDate(input.profile, transitData.planets));
+
+        /**
+         * Best-effort continuity with the horoscope the reader may already have seen.
+         * The daily insight has its own lifecycle and may be pending, failed or absent —
+         * this must never wait for it, so a missing teaser simply drops the block from
+         * the prompt.
+         */
+        const daily = await fastify.db.query.dailyInsights.findFirst({
+            columns: { content: true },
+            where: and(eq(dailyInsights.userId, userId), eq(dailyInsights.date, date)),
+        });
+
+        const teaser: MoonTeaser | null = daily?.content
+            ? {
+                  ...daily.content.moon,
+                  // What the horoscope already proposed for the day as a whole, so the
+                  // Moon screen narrows it rather than repeating or contradicting it.
+                  opportunities: daily.content.opportunity?.examples,
+                  watchOuts: daily.content.watchOut?.examples,
+              }
+            : null;
 
         // One retry, because most failures here are a timeout or a rate limit rather
         // than anything a second attempt would hit again.
         for (let attempt = 1; attempt <= 2; attempt++) {
-            const { content, usage } = await generateDailyInsight({
-                transits: {
-                    planets: transitData.planets as DailyTransits["planets"],
-                    aspects: transitData.aspects as DailyTransits["aspects"],
-                },
-                score,
+            const { content, usage } = await generateMoonInsight({
+                // The stored variant, not today's: it is what this row promised.
+                variant: claimed.variant,
+                moon,
+                contacts,
+                teaser,
+                languageIso: input.profile.language,
                 // The stored row satisfies Reader structurally, so nothing has to be
                 // picked apart here and forgotten when a field is added.
                 reader: input.profile,
-                languageIso: input.profile.language,
+                natalMoonSign: input.profile.moonSign,
             });
 
             // The audit row is the only place the prompt, the answer and the price
-            // survive, and it must never be the reason a finished horoscope is lost.
+            // survive, and it must never be the reason a finished text is lost.
             await fastify.db
                 .insert(aiGenerations)
                 .values({
                     userId,
-                    type: "dailyInsight",
+                    type: "moonInsight",
                     status: content ? "success" : "error",
                     error: usage.error,
                     requestId: usage.requestId,
@@ -233,15 +261,15 @@ async function generate(
 
             if (content) {
                 const written = await fastify.db
-                    .update(dailyInsights)
+                    .update(moonInsights)
                     .set({ content, status: "ready", updatedAt: sql`date_trunc('milliseconds', now())` })
                     .where(owned)
-                    .returning({ date: dailyInsights.date });
+                    .returning({ date: moonInsights.date });
 
                 // Nothing matched: the row moved on while the model was writing. Worth
-                // saying out loud — the horoscope was paid for and then thrown away.
+                // saying out loud — the text was paid for and then thrown away.
                 if (written.length === 0) {
-                    fastify.log.warn({ userId, date }, "Generated insight discarded, the row had moved on");
+                    fastify.log.warn({ userId, date }, "Generated moon insight discarded, the row had moved on");
                 }
 
                 return;
@@ -249,105 +277,89 @@ async function generate(
         }
 
         await fastify.db
-            .update(dailyInsights)
+            .update(moonInsights)
             .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
             .where(owned);
-    })().catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Generation crashed"));
+    })().catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Moon generation crashed"));
+}
+
+/**
+ * Creates the day's row if it is not there, and returns the deterministic half.
+ *
+ * The claim in `generate` is an UPDATE, so it can only fire on a row that already exists
+ * — which is why both routes run this before claiming. `variant` is written exactly once,
+ * here: on conflict nothing changes, so a row created on an earlier read keeps the
+ * variant its text was written for even if the reader has since crossed a timezone.
+ */
+async function ensureRow(
+    db: FastifyInstance["db"],
+    input: { userId: string; profile: typeof profileTable.$inferSelect; date: string }
+): Promise<{ moon: MoonToday; transits: TransitChart }> {
+    const { date, userId } = input;
+
+    const transitData = await getOrCreateTransits(db, date, input.profile.timezone);
+
+    const moon = describeMoonDay({
+        date,
+        timezone: input.profile.timezone,
+        sunLongitude: transitData.planets.sun.longitude,
+        moonLongitude: transitData.planets.moon.longitude,
+        moonSign: transitData.planets.moon.sign,
+    });
+
+    await db.insert(moonInsights).values({ userId, date, variant: moon.variant }).onConflictDoNothing();
+
+    // The transits come back with it: scoring the day needs them, and they cost a query.
+    return { moon, transits: transitData.planets };
 }
 
 async function buildResponse(
     db: FastifyInstance["db"],
-    input: { userId: string; profile: ScoringProfile; date: string }
+    input: { userId: string; profile: typeof profileTable.$inferSelect; date: string }
 ): Promise<ResponseData> {
     const { date, userId } = input;
 
-    const tomorrow = dayjs.utc(date).add(1, "day").format("YYYY-MM-DD");
-    const yesterday = dayjs.utc(date).add(-1, "day").format("YYYY-MM-DD");
+    const { moon, transits } = await ensureRow(db, input);
 
-    const timelineStartDate = dayjs.utc(date).subtract(TIMELINE_DAYS_BACK, "days").format("YYYY-MM-DD");
-    const timelineEndDate = dayjs.utc(date).add(TIMELINE_DAYS_FORWARD, "days").format("YYYY-MM-DD");
+    // Recomputed on every read, exactly like the rest of the deterministic half, and from
+    // the same contacts the text was written from.
+    const contacts = lunarContacts(scoreProfileForDate(input.profile, transits));
 
-    /**
-     * Scoring is deterministic and idempotent, so it is safe on the read path — and this
-     * is the only place that keeps the timeline whole. The sign-in backfill fills a
-     * window once, but the window moves every midnight and no new session is created
-     * when the app simply opens on a new day.
-     */
-    await backfillScoresForUser(db, {
-        userId,
-        profile: input.profile,
-        date,
-        daysBack: TIMELINE_DAYS_BACK,
-        daysForward: TIMELINE_DAYS_FORWARD,
-    });
-
-    const scores = await getOrCreateDailyScore(db, { userId, profile: input.profile, date });
-
-    const stored = await db.query.dailyInsights.findFirst({
-        columns: { content: true, status: true },
-        where: and(eq(dailyInsights.userId, userId), eq(dailyInsights.date, date)),
-    });
-
-    const transitData = await getOrCreateTransits(db, date, input.profile.timezone);
-    const score = scoreProfileForDate(input.profile, transitData.planets);
-
-    const timeline = await db
-        .select({
-            date: dailyInsights.date,
-            love: dailyInsights.loveScore,
-            career: dailyInsights.careerScore,
-            health: dailyInsights.healthScore,
-            mood: dailyInsights.moodScore,
-            overall: dailyInsights.overallScore,
-        })
-        .from(dailyInsights)
-        .where(and(eq(dailyInsights.userId, userId), between(dailyInsights.date, timelineStartDate, timelineEndDate)))
-        .orderBy(asc(dailyInsights.date));
-
-    // Only the deterministic half goes through the serializer: it turns numeric-looking
-    // strings into numbers, which is right for numeric columns and wrong for free text.
-    const deterministic = serializeDrizzleData({
-        date,
-        scores: {
-            love: scores.loveScore,
-            career: scores.careerScore,
-            health: scores.healthScore,
-            mood: scores.moodScore,
-            overall: scores.overallScore,
-        },
-        timeline: timeline.map((item) => ({
-            ...item,
-            isToday: item.date === date,
-            isTomorrow: item.date === tomorrow,
-            isYesterday: item.date === yesterday,
-        })),
-        moon: {
-            phase: getMoonPhase(transitData.planets.sun.longitude, transitData.planets.moon.longitude),
-            illumination: moonIllumination(
-                elongation(transitData.planets.moon.longitude, transitData.planets.sun.longitude)
-            ),
-            sign: transitData.planets.moon.sign,
-        },
-        // Already strongest-first out of the scorer, and the array keeps it that way.
-        planets: summarizePlanetInfluence(score.impacts).map((weight) => ({
-            name: weight.name,
-            score: weight.score,
-            contacts: weight.contacts.map(toContactSummary),
-        })),
+    const stored = await db.query.moonInsights.findFirst({
+        columns: { content: true, status: true, variant: true },
+        where: and(eq(moonInsights.userId, userId), eq(moonInsights.date, date)),
     });
 
     return {
-        ...deterministic,
+        date,
+        sign: moon.sign,
+        phase: moon.phase,
+        illumination: moon.illumination,
+        variant: stored?.variant ?? moon.variant,
+        nextFullMoon: moon.nextFullMoon,
+        nextNewMoon: moon.nextNewMoon,
+        aspects: contacts.map((contact) => toContactSummary(contact)),
         // `absent` is reported as pending: the read path claims the generation before it
         // answers, so the client never has to know that state exists.
         content:
             stored?.status === "ready" && stored.content
-                ? { status: "ready" as const, data: stored.content, error: null }
+                ? {
+                      status: "ready" as const,
+                      // Rows written before captions and chips existed carry neither.
+                      // Empty is the honest answer, and the screen simply falls back to
+                      // the numbers rather than the response failing to serialize.
+                      data: {
+                          ...stored.content,
+                          contacts: stored.content.contacts ?? {},
+                          activities: stored.content.activities ?? { supported: [], avoid: [] },
+                      },
+                      error: null,
+                  }
                 : stored?.status === "failed"
                   ? {
                         status: "failed" as const,
                         data: null,
-                        error: { code: "generation_failed", message: "Generating today's reading failed." },
+                        error: { code: "generation_failed", message: "Generating today's Moon reading failed." },
                     }
                   : { status: "pending" as const, data: null, error: null },
     };
@@ -437,10 +449,10 @@ export default (async (fastify) => {
 
                 /**
                  * The one side effect of this route: the first read of a day starts the
-                 * horoscope. Opening the screen is the moment the user asks for it, so
-                 * there is nothing else to press. Reads after that change nothing — the
-                 * claim only fires while the day has no content and no live run, and a
-                 * failed one is left for the explicit retry.
+                 * text. Opening the screen is the moment the user asks for it, so there
+                 * is nothing else to press. Reads after that change nothing — the claim
+                 * only fires while the day has no content and no live run, and a failed
+                 * one is left for the explicit retry.
                  *
                  * It runs after the response is built because that is what guarantees the
                  * row exists; a day with no content is reported as `pending` either way,
@@ -459,7 +471,7 @@ export default (async (fastify) => {
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 
-                request.log.error({ err: error }, "Failed to read daily insight");
+                request.log.error({ err: error }, "Failed to read moon insight");
 
                 return reply.status(500).send({
                     error: {
@@ -480,9 +492,9 @@ export default (async (fastify) => {
         "/insight/generate",
         {
             /**
-             * The only endpoint that spends money on demand, and there is no attempts
-             * counter behind it. Three an hour covers a real failure the user wants to
-             * retry, and stops a stuck day from being retried into a bill.
+             * The only endpoint here that spends money on demand, and there is no
+             * attempts counter behind it. Three an hour covers a real failure the user
+             * wants to retry, and stops a stuck day from being retried into a bill.
              */
             config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
             schema: {
@@ -517,6 +529,10 @@ export default (async (fastify) => {
             try {
                 const date = dayjs.utc(request.body.date).format("YYYY-MM-DD");
 
+                // The client may retry a day it has never read, and the claim below can
+                // only update a row that is already there.
+                await ensureRow(fastify.db, { userId: session.user.id, profile: session.profile, date });
+
                 /**
                  * Retry after a failure — the one path allowed to claim a `failed` day.
                  * Claimed before the response is built, so the client is told `pending`
@@ -539,7 +555,7 @@ export default (async (fastify) => {
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 
-                request.log.error({ err: error }, "Failed to generate daily insight");
+                request.log.error({ err: error }, "Failed to generate moon insight");
 
                 return reply.status(500).send({
                     error: {

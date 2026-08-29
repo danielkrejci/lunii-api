@@ -6,6 +6,7 @@ import {
     NatalChart,
     NatalPoint,
     NATAL_POINTS,
+    PERSONAL_POINTS,
     PLANETS,
     TransitChart,
 } from "./types";
@@ -154,6 +155,93 @@ export function findTransitToNatalAspects(
     }
 
     return hits;
+}
+
+/* ============================================================
+   NATAL → NATAL
+============================================================ */
+
+/**
+ * One standing aspect inside the birth chart itself.
+ *
+ * Deliberately not an `AspectHit`: that type names a transiting body and a natal one,
+ * and here neither side is moving. These do not change over a lifetime, which is the
+ * whole point of them — they describe how someone is built rather than what today is
+ * doing to them.
+ */
+export interface NatalAspect {
+    a: NatalPoint;
+    b: NatalPoint;
+    aspect: AspectType;
+    group: AspectGroup;
+    orb: number;
+    /** 1 at exact, 0 at the edge of the orb. */
+    strength: number;
+}
+
+/**
+ * Every aspect the chart makes to itself, tightest first.
+ *
+ * Each unordered pair is visited once — the inner loop starts past the outer one — so a
+ * Sun–Saturn square is reported as one aspect rather than as itself and its mirror.
+ * Iterates NATAL_POINTS, so the order is fixed regardless of how the chart's keys came
+ * back from JSONB.
+ */
+export interface FindNatalAspectsOptions extends FindAspectsOptions {
+    /**
+     * Keep only aspects with at least one personal endpoint. Off by default so the
+     * geometry stays complete; on for anything that describes the person rather than
+     * the chart.
+     */
+    personalOnly?: boolean;
+}
+
+export function findNatalAspects(natal: NatalChart, options: FindNatalAspectsOptions = {}): NatalAspect[] {
+    const aspects: NatalAspect[] = [];
+
+    for (let i = 0; i < NATAL_POINTS.length; i++) {
+        const a = NATAL_POINTS[i];
+        const positionA = natal[a];
+
+        // Ascendant is absent when the birth time is unknown.
+        if (!positionA) {
+            continue;
+        }
+
+        for (let j = i + 1; j < NATAL_POINTS.length; j++) {
+            const b = NATAL_POINTS[j];
+            const positionB = natal[b];
+
+            if (!positionB) {
+                continue;
+            }
+
+            if (options.personalOnly && !PERSONAL_POINTS.includes(a) && !PERSONAL_POINTS.includes(b)) {
+                continue;
+            }
+
+            // Same bonus as the transit path, and for the same reason: an assumed noon
+            // puts the Moon up to ~6.6° from where it really was.
+            const orbBonus = options.widenNatalMoon && (a === "moon" || b === "moon") ? UNKNOWN_TIME_MOON_ORB_BONUS : 0;
+
+            const found = findAspect(positionA.longitude, positionB.longitude, orbBonus);
+
+            if (!found) {
+                continue;
+            }
+
+            aspects.push({
+                a,
+                b,
+                aspect: found.aspect,
+                group: ASPECT_GROUP[found.aspect],
+                orb: found.orb,
+                strength: orbStrength(found.orb, found.maxOrb),
+            });
+        }
+    }
+
+    return aspects.sort((x, y) => y.strength - x.strength || x.a.localeCompare(y.a) || x.b.localeCompare(y.b));
 }
 
 /** Canonical key for an unordered pair, so AspectRule lookups are direction-free. */

@@ -13,7 +13,7 @@ import {
     TransitAspectsPlanet,
     TransitPlanets,
 } from "../utils/natalUtils";
-import { computeTransitChart, transitInstantForDate } from "./astro";
+import { computeTransitChart, MoonPhase, transitInstantForDate } from "./astro";
 
 dayjs.extend(utc);
 dayjs.extend(timezonePlugin);
@@ -145,36 +145,36 @@ export function createTransitJob(db: FastifyInstance["db"]) {
     return job;
 }
 
-export function getMoonPhase(sunDegree: number, moonDegree: number): string {
+export function getMoonPhase(sunDegree: number, moonDegree: number): MoonPhase {
     const angle = (moonDegree - sunDegree + 360) % 360;
 
     if (angle < 22.5 || angle >= 337.5) {
-        return "New Moon";
+        return "newMoon";
     }
 
     if (angle < 67.5) {
-        return "Waxing Crescent";
+        return "waxingCrescent";
     }
 
     if (angle < 112.5) {
-        return "First Quarter";
+        return "firstQuarter";
     }
 
     if (angle < 157.5) {
-        return "Waxing Gibbous";
+        return "waxingGibbous";
     }
 
     if (angle < 202.5) {
-        return "Full Moon";
+        return "fullMoon";
     }
 
     if (angle < 247.5) {
-        return "Waning Gibbous";
+        return "waningGibbous";
     }
 
     if (angle < 292.5) {
-        return "Last Quarter";
+        return "lastQuarter";
     }
 
-    return "Waning Crescent";
+    return "waningCrescent";
 }

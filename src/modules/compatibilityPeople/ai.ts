@@ -5,6 +5,8 @@ import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageU
 import { Gender, Relationship, ZodiacSign } from "../../utils/natalUtils";
 import { parseLLMJson } from "../../utils/stringUtils";
 import { toResponseJsonSchema } from "../../utils/zodResponse";
+import { buildReaderBlock, Reader } from "../insights/reader";
+import { REASON_RULES, VOICE_RULES } from "../insights/voice";
 import { Category, INSIGHT_DIRECTIONS, RELATIONSHIP_CATEGORIES } from "./types";
 
 const overviewBlockSchema = z.object({
@@ -73,6 +75,9 @@ export type DailyCompatibilityAiInput = {
 
     relationshipType: Relationship;
 
+    /** The person holding the phone. Person A is them; the text is written to them. */
+    reader: Reader;
+
     personA: {
         name: string;
         sunSign: ZodiacSign;
@@ -89,9 +94,18 @@ export type DailyCompatibilityAiInput = {
     negativeAspects: AiAspect[];
 };
 
-function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
+function buildPrompt(language: string, readerBlock: string, input: DailyCompatibilityAiInput) {
     return `
-        You are writing a daily compatibility interpretation for two people.
+                ==================================================
+        LANGUAGE AND FORM OF ADDRESS
+        ==================================================
+
+        ${language}
+
+        This governs every field you return. It is repeated at the end; check it again before you
+        answer.
+
+You are writing a daily compatibility interpretation for two people.
 
         Your task is to interpret the provided astrological compatibility data for ONE specific day.
 
@@ -140,12 +154,20 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
         Everything must be based ONLY on the supplied input.
         Never invent planetary influences.
         Never mention scores, weights or technical values.
-        Write naturally.
-        Avoid generic horoscope language.
-        Avoid dramatic, fatalistic or absolute statements.
         Do not repeat the same ideas across multiple sections.
         Every section should contribute something different.
-        The response should feel like an experienced astrologer translating astrology into practical relationship guidance.
+
+        ==================================================
+        HOW TO WRITE IT
+        ==================================================
+
+        ${VOICE_RULES}
+
+        --------------------------------------------------
+        EXPLANATION FIELDS ("reason")
+        --------------------------------------------------
+
+        ${REASON_RULES}
 
         ==================================================
         ASTROLOGY VISIBILITY
@@ -177,18 +199,7 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
         - negativeOverview.reason
         - insights[].reason
 
-        For these fields:
-
-        Mention planets naturally.
-        Mention at most two important aspects.
-        Explain HOW the planetary energies work together.
-        Do NOT simply list aspects.
-
-        Good:
-        "Mercury's harmonious connection with the Sun encourages honest communication, while the Moon adds emotional openness."
-
-        Bad:
-        "Mercury trine Sun. Moon sextile Venus."
+        At most two planets per field, and say what they do together rather than listing them.
 
         ==================================================
         OVERVIEW
@@ -198,30 +209,9 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
 
         Maximum 220 characters.
 
-        Do NOT mention either person's name.
+        Never use the reader's own name. Use the other person's freely.
 
-        Do NOT refer to "Person A", "Person B" or their names.
-
-        Always write about the relationship using neutral language such as:
-
-        - you
-        - the relationship
-        - your connection
-        - each other
-
-        Never write:
-
-        "Daniel..."
-        "Sarah..."
-        "Daniel and Sarah..."
-
-        Instead write:
-
-        "You may feel emotionally closer today."
-
-        or
-
-        "Communication flows naturally today."
+        Write to the reader as "you", and about the other person by name.
 
         Mention both opportunities and challenges.
 
@@ -486,9 +476,8 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
 
         2-3 short sentences.
         Maximum 180 characters.
-        Actionable.
-        Optimistic.
-        Specific.
+        Actionable and specific to these two people today — say what to do, and when.
+        Honest: on a difficult day, say the difficult thing.
         Naturally combine today's opportunities and today's challenges.
         No astrology.
         Avoid generic advice.
@@ -553,29 +542,25 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
         - crush
 
         ==================================================
-        PEOPLE
+        WHO IS READING THIS
         ==================================================
+
+        ${input.personA.name} is reading this about ${input.personB.name}.
+
+        Write to ${input.personA.name} as "you". Never use their name — they know it.
+
+        Use ${input.personB.name}'s name. It is what makes this about these two people
+        rather than about a pair in general, and "the relationship" in every sentence is
+        the register of a generic compatibility report.
 
         Relationship type: ${input.relationshipType}
 
-        Person A
+        ${input.personB.name} is ${input.personB.gender}. Use gender only for
+        grammatically correct language.
 
-        name: ${input.personA.name}
-        gender: ${input.personA.gender}
-        sun sign: ${input.personA.sunSign}
+        Treat zodiac signs only as internal context. Never mention them.
 
-        Person B
-
-        name: ${input.personB.name}
-        gender: ${input.personB.gender}
-        sun sign: ${input.personB.sunSign}
-
-
-        Use gender only for grammatically correct language.
-
-        Treat zodiac signs only as internal context.
-
-        Never mention zodiac signs.
+        ${readerBlock}
 
         Respond ONLY in:
 
@@ -585,7 +570,17 @@ function buildPrompt(language: string, input: DailyCompatibilityAiInput) {
         INPUT DATA
         ==================================================
 
-        ${JSON.stringify(input, null, 2)}
+        ${JSON.stringify(
+            {
+                score: input.score,
+                modifier: input.modifier,
+                breakdown: input.breakdown,
+                positiveAspects: input.positiveAspects,
+                negativeAspects: input.negativeAspects,
+            },
+            null,
+            2
+        )}
         `;
 }
 
@@ -619,7 +614,12 @@ export async function generateDailyOverview(
 }> {
     const language = getLanguageByIso(languageIso);
 
-    const prompt = buildPrompt(language ? buildPromptLanguageRule(language) : languageIso, input);
+    // Person A is the reader — the gendered forms and the profile are theirs.
+    const prompt = buildPrompt(
+        language ? buildPromptLanguageRule(language, input.reader.gender) : languageIso,
+        buildReaderBlock(input.reader),
+        input
+    );
 
     const startedAt = Date.now();
 
@@ -627,6 +627,14 @@ export async function generateDailyOverview(
         model: MODEL,
         contents: prompt,
         config: {
+            /**
+             * Thinking off. Measured on the daily prompt: the default budget spends
+             * 2 000–9 500 hidden tokens, costs 40 % more and takes 48–64 s instead of 27 s,
+             * and the only thing it bought was reaching back for the address rule buried at
+             * the end of the prompt. That rule now sits at the top as well, so there is
+             * nothing left for it to buy.
+             */
+            thinkingConfig: { thinkingBudget: 0 },
             temperature: 0.5,
             responseMimeType: "application/json",
             responseJsonSchema: toResponseJsonSchema(dailyOverviewSchema),
@@ -636,7 +644,14 @@ export async function generateDailyOverview(
     const text = response.text ?? "";
 
     const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
-    const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+    /**
+     * Thinking tokens are billed at the output rate but are not part of
+     * `candidatesTokenCount`, so leaving them out under-reported every generation by
+     * 30–45 % while the default budget was on. Counted here so the audit row is what
+     * was actually charged rather than what was visible.
+     */
+    const outputTokens =
+        (response.usageMetadata?.candidatesTokenCount ?? 0) + (response.usageMetadata?.thoughtsTokenCount ?? 0);
 
     const usage = {
         requestId: response.responseId ?? "",

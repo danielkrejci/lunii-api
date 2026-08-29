@@ -74,3 +74,19 @@ function escapeControlCharsInStrings(json: string): string {
 
     return result;
 }
+
+/**
+ * "in_a_relationship" → "in a relationship".
+ *
+ * The client sends these seven profile fields as English enum keys, and the server keeps
+ * them as free strings on purpose. Prompts still must not see the underscores: a model
+ * given `do_my_research` will sooner or later hand it back to the reader verbatim.
+ */
+export function humanizeEnum(value: string): string {
+    return value.replaceAll("_", " ").trim();
+}
+
+/** The same, for the array-valued fields. Empty entries are dropped rather than padded. */
+export function humanizeEnums(values: string[] | null | undefined): string[] {
+    return (values ?? []).map(humanizeEnum).filter(Boolean);
+}

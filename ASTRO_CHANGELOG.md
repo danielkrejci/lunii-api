@@ -24,6 +24,258 @@ pnpm tsx src/scripts/analyzeDailyScoreRules.ts --top 30
 
 ---
 
+## 2026-08-30 — The planetary panel moved to its own on-demand route
+
+**What** — the ten planet texts are no longer written by the daily horoscope generation.
+They live in `planet_insights`, are written by `modules/insights/planets.ts` and are served
+by `/daily-insight/planets`, which generates them on first read exactly as Moon Today does.
+
+`/daily-insight/insight` no longer returns `content.data.planets`. Its deterministic half —
+`data.planets` with each body's score and contacts — is unchanged, so the list still renders
+from the horoscope response alone.
+
+**Reason** — measured on a real generation: `planets[]` was 18 124 of 21 250 output
+characters, **85 % of the output and therefore 85 % of the cost**, for text that is only
+read when someone opens a planet. Most days nobody does, and the horoscope was waiting for
+it.
+
+Generating all ten in one request rather than one per tap: the output is the same text
+either way, so per-planet only saves when few are opened, and it costs a second spinner on
+every first tap, ten lifecycles instead of one, and ten chances to contradict each other.
+
+The panel gets the finished horoscope as context so the two agree. Best-effort, not
+awaited — the list renders instantly from the deterministic half, so a planet can be tapped
+while the horoscope is still generating, and waiting would freeze the panel whenever the
+horoscope failed.
+
+**Evidence** — same chart, same day, both generations measured end to end:
+
+```
+                        latency   input    output    cost
+before (one call)        63.6 s   11 678    6 324   $0.0193
+after — horoscope         6.3 s    8 694    1 015   $0.0051
+after — panel            22.6 s    5 396    4 443   $0.0127
+```
+
+Horoscope alone: **63.6 s to 6.3 s**, ten times faster. Opening the panel as well costs
+$0.0179 against $0.0193 before, so the split is *cheaper even for a reader who opens it* —
+the planet prompt drops every horoscope instruction, so the doubled context costs less than
+the estimate that justified the change. Not opening it costs $0.0051, a 74 % saving.
+
+Contact join verified: 29 contacts out of the engine, 29 carried into the text, none
+dropped.
+
+**Note** — `daily_insights` rows written before this still carry `planets` inside their
+`content` JSON. Nothing reads it; it ages out with the row.
+
+---
+
+## 2026-08-30 — Thinking off, and the address rule moved to the top of every prompt
+
+**What** — all four generations now pass `thinkingConfig: { thinkingBudget: 0 }`, and the
+language-and-address rule from `buildPromptLanguageRule` is interpolated at the top of each
+prompt as well as at the end. The cost calculation now counts `thoughtsTokenCount`.
+
+**Reason** — `gemini-2.5-flash` thinks by default, and on the daily prompt it was spending
+2 000–9 500 hidden tokens per call. Those are billed at the output rate, so every audit row
+under-reported what was actually charged by 30–45 %.
+
+Turning thinking off alone broke the informal address: the reply came back in the formal
+form throughout. The rule had always been at the very end of a 45 000-character prompt, and
+thinking was what made the model reach back for it. Repeating it at the top fixes that at
+any budget, which means the thinking was buying nothing else.
+
+**Evidence** — same prompt, same day, same reader; address form counted by regex over the
+whole JSON reply:
+
+```
+budget      latency   thinking   output    cost      address form
+default      47.8 s      2 003    7 773   $0.0279   informal 39 : formal   0
+default      64.4 s      9 543    4 869   $0.0395   informal —  : formal   —
+0            26.2 s          0    5 458   $0.0171   informal  1 : formal 108  ← broken
+512          24.3 s        505    4 450   $0.0158   informal  4 : formal  99  ← broken
+2048         47.3 s      2 047    8 088   $0.0288   informal 56 : formal   0
+0   + rule on top   27.0 s   0    5 585   $0.0174   informal 80 : formal   0
+512 + rule on top   28.5 s 455    5 034   $0.0172   informal 52 : formal   0
+```
+
+The two default runs differ by 35 % in latency and 42 % in cost because the default budget
+is dynamic — capping it also removes that variance.
+
+The duplication is not belt-and-braces. Removing the top copy and keeping only the one at
+the end, thinking off:
+
+```
+prompt                     length      address form
+horoscope, top + end       45 296 ch   informal 11 : formal  0
+horoscope, end only        44 666 ch   informal  0 : formal 16
+horoscope, end only        44 666 ch   informal  0 : formal 17
+planets,   top + end       20 323 ch   informal 60 : formal  0
+planets,   end only        19 693 ch   informal 61 : formal  1
+planets,   end only        19 693 ch   informal  0 : formal 86
+```
+
+The horoscope fails every time without it. The planet panel, at half the length, fails
+*intermittently* — which is worse, because one manual check passes and production does not.
+The copy costs ~630 characters.
+
+Net for the daily horoscope: **48–64 s to 27 s, and $0.028–0.040 to $0.019** at equal
+quality.
+
+**Note** — thinking is off for the compatibility and Moon prompts too, on the same
+reasoning, but only the daily and onboarding prompts were measured directly. If a prompt
+later grows a rule that the model has to hold across the whole context, this is the first
+setting to suspect.
+
+---
+
+## 2026-08-29 — Personal data now changes the interpretation, not the salutation
+
+**What** — three changes to how the four prompts see the reader.
+
+The seven onboarding fields reach the prompts through one shared block,
+`buildReaderBlock` in `src/modules/insights/reader.ts`, used by the daily horoscope, the
+Moon screen and the compatibility overview. `goalsForTheYear` was loaded from the database
+and dropped before the prompt for as long as the field has existed. `decisionStyle`,
+`careerStage`, `beliefLevel`, `contentPreference` and the stored `personalityProfile`
+reached no prompt but the onboarding one.
+
+The daily prompt's priority list put the sky at 1–3 and did not rank the reader's own
+transits at all; that is inverted. `EXAMPLE EVERYDAY SITUATIONS`, `REALISTIC EVERYDAY
+MOMENTS`, two of the three dominant aspects and the duplicated `expression.*` lists are
+gone, along with the instruction to "describe situations that many people genuinely
+experience" — a direct order to be generic in a prompt whose stated thesis is the
+opposite.
+
+Form of address and grammatical gender moved into `buildPromptLanguageRule`, carried per
+language by `Language.addressForm`.
+
+**Reason** — the prompts were not under-written, they were under-fed. About 85% of the
+daily prompt's astrological payload comes from `analyzeTransits`, which takes the sky and
+never touches the natal chart, so it is identical for every reader in a timezone. The one
+block that was the reader's arrived as bare aspect names because `buildImpacts` never
+copied `rule.description` onto the `Impact`. Rich generic material next to skeletal
+personal material produces a well-written horoscope about today's sky.
+
+`addressForm` is per language rather than one global rule because the distinction is not
+binary everywhere. `ja` and `ko` are marked `polite`, not `informal`: they have politeness
+levels rather than a T/V pair, and the plain form from an app reads as rude rather than
+friendly. `hi` and `id` are `polite` because आप and Anda are what a product uses with a
+stranger. `en`, `sv`, `da`, `nb`, `fi` and `ar` are `informal` as a no-op — they have no
+V-form, or lost it.
+
+The non-binary branch does not say "write neutrally". Czech has no gender-neutral past
+tense for the second person, so a model told to be neutral picks one anyway; it is told to
+avoid participles instead.
+
+Standing natal aspects are filtered to `PERSONAL_POINTS`. Sorting by tightness alone
+returned Jupiter trine Pluto and Neptune sextile Pluto — true of the chart, and shared by
+everyone born within years of it. This is the same argument `isExcludedPair` already makes
+in `dailyScore/factors.ts`, one layer stronger: a personality reading needs one end of the
+aspect to be Sun, Moon, Mercury, Venus, Mars or the Ascendant. The same filter applies to
+the placements the reader block names, for the same reason — "their Uranus in Capricorn"
+describes a birth cohort.
+
+**Evidence** — two A/B pairs, each two readers with an identical chart and date and
+opposite decision style, career stage, relationship status and goals.
+
+Onboarding profile, same Sun/Moon/Rising:
+
+```
+A (researches, changing field)  core: "Než se pohneš, potřebuješ si shromáždit mnoho informací"
+B (goes with gut, established)  core: "nakonec se vždy spolehneš na své vnitřní vedení"
+```
+
+Daily horoscope, same chart and same day:
+
+```
+A  "...můžeš narazit na tření při komunikaci svých nápadů nebo při nutnosti
+    rychle se rozhodnout, což obvykle raději důkladně prozkoumáš"
+B  "I když jsi zvyklá rozhodovat se rychle a podle pocitu, dnes se mohou vynořit
+    hlubší vrstvy, které tvému rychlému úsudku dodají potřebnou hloubku"
+```
+
+The same Mercury tension, read two ways because the reader decides differently. Both texts
+are informal and in feminine forms, which is the language rule landing.
+
+Measured on a real prompt after the cuts: 44 899 characters, of which the generic sky is
+16 381 and the personal transits plus the reader block are 3 152 — a ratio of 1 : 5.2. The
+cuts are not what moved the needle; the priority order and the instruction on what to do
+with the reader are.
+
+Cost per daily generation, from `usage`: ~10 200 input and 6 500–7 600 output tokens,
+$0.0195–$0.0221. Output is 78% of it, so trimming the prompt saves little — the ten-body
+planet panel is the bill.
+
+**Note** — the seven profile fields stay unconstrained `text` on the server. The client
+sends English enum keys (`in_a_relationship`, `do_my_research`), and prompts humanize the
+underscores rather than the server pinning an enum. Known risk, accepted deliberately: the
+option lists live in the mobile app, and a server-side enum would need a client change and
+a migration of existing values.
+
+Two rule violations survive in the output and are worth watching. The model still names
+astrology directly on occasion ("Dnešní úplněk v Rybách"), against a rule that predates
+this change; and it paraphrases the stored profile back at the reader despite being told
+not to. Neither is frequent enough to have a fix that is not more prompt text.
+
+---
+
+## 2026-08-17 — Full and New Moon are anchored to the instant, not to an angular window
+
+**What** — the Moon Today screen shows a dedicated hero layout on the Full and New Moon.
+Which day that is comes from the exact lunation instant, not from `getMoonPhase`.
+`getMoonPhase` is unchanged and still buckets the cycle into eight 45° slices; it names
+the phase, it does not decide the event.
+
+**Reason** — `getMoonPhase`'s `fullMoon` bucket spans ±22.5°, about 3.7 days, so a hero
+driven by it would run for four days in a row. The obvious fix — narrow the bucket to
+roughly a day — does not work, and the reason is the sampling rather than the astrology.
+Transits are stored once per date at local noon, and the Moon's elongation advances
+10.76–14.37° per day. A window narrow enough to select one day (~12.2°) is sometimes
+narrower than the gap between two consecutive samples, so the event falls between them
+and **no day is flagged at all**.
+
+The instant is unambiguous: it belongs to exactly one calendar day in any given zone.
+That yields one hero day per lunation, with no gaps and no duplicates, and it is
+timezone-correct — Honolulu and Auckland get their own right day rather than a shared
+UTC one.
+
+It also makes the displayed illumination honest. The worst case is local noon a full
+twelve hours from the exact instant, which is an elongation of 173.9° and 99.7% lit —
+still 100% after rounding. The old ±22.5° window would have shown a "Full Moon" at 96%.
+
+**Evidence** — swept 50 lunations over four years against the real ephemeris, sampling
+at local noon exactly as the transit table does:
+
+```
+elongation per day: min 10.76°  max 14.37°  mean 12.19°
+
+half-width        window   lunations with no day   lunations with >1 day
+±22.5° (current)   ~89h              0                     50/50
+±12.19°            ~48h              0                     42/50
+±9°                ~35h              0                     24/50
+±6.1°              ~24h              3                      3/50
+±3°                ~12h             24                      0/50
+```
+
+Then walked 70 consecutive days through `describeMoonDay` for Europe/Prague: exactly two
+`fullMoon` days and two `newMoon` days, each reading 100% and 0% illuminated. The same
+dates checked across Pacific/Honolulu, UTC and Pacific/Auckland resolve to different
+local days, as they must.
+
+`src/modules/moon/lunation.test.ts` locks the search itself: elongation within 0.002° of
+the target, consecutive full moons 29.18–29.93 days apart across three years, and never
+an instant before the one searched from.
+
+**Note** — `getJulianDay` in `src/modules/astro/ephemeris.ts` passes the hour to
+`swe_julday` as `getUTCHours() + getUTCMinutes() / 60` and drops seconds. Harmless where
+it is used, since every caller samples on a whole minute, but it would cap the root
+search at one-minute resolution. `src/modules/moon/lunation.ts` converts from the Unix
+epoch instead. `getJulianDay` was deliberately left alone — every stored `birthChart` was
+computed with it.
+
+---
+
 ## 2026-08-05 — Reading split from generating on every AI endpoint
 
 Revision of the entry below, which put generation behind a route the client wanted to

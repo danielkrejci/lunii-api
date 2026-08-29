@@ -34,6 +34,27 @@ export const PLANETS: readonly Planet[] = [
     "pluto",
 ];
 
+export type MoonPhase =
+    | "newMoon"
+    | "waxingCrescent"
+    | "firstQuarter"
+    | "waxingGibbous"
+    | "fullMoon"
+    | "waningGibbous"
+    | "lastQuarter"
+    | "waningCrescent";
+
+export const MOON_PHASES: readonly MoonPhase[] = [
+    "newMoon",
+    "waxingCrescent",
+    "firstQuarter",
+    "waxingGibbous",
+    "fullMoon",
+    "waningGibbous",
+    "lastQuarter",
+    "waningCrescent",
+];
+
 /** Points that can be aspected in a natal chart. The Ascendant is never a transiting body. */
 export type NatalPoint = Planet | "ascendant";
 
@@ -41,6 +62,16 @@ export const NATAL_POINTS: readonly NatalPoint[] = [...PLANETS, "ascendant"];
 
 /** Slow points are generational — a whole birth cohort shares them. */
 export const OUTER_PLANETS: readonly Planet[] = ["uranus", "neptune", "pluto"];
+
+/**
+ * The points that describe a person rather than a birth cohort.
+ *
+ * Everything slower than Mars holds nearly the same angle for months or years, so an
+ * aspect between two of them is shared by everyone born around the same time — true of
+ * the chart, and useless as a description of whose chart it is. A standing aspect earns
+ * a place in a personality reading only when one end of it is one of these.
+ */
+export const PERSONAL_POINTS: readonly NatalPoint[] = ["sun", "moon", "mercury", "venus", "mars", "ascendant"];
 
 export type Layer = "fast" | "slow";
 

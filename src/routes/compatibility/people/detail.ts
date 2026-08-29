@@ -290,6 +290,10 @@ async function generate(
 
                 relationshipType: person.relationship,
 
+                // The stored row satisfies Reader structurally, so nothing has to be
+                // picked apart here and forgotten when a field is added.
+                reader: profile,
+
                 personA: { name: profile.name, gender: profile.gender, sunSign: profile.sunSign },
                 personB: { name: person.name, gender: person.gender, sunSign: person.sign },
             });

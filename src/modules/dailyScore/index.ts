@@ -26,9 +26,11 @@ import { DIRECTION_OVERRIDES } from "./overrides";
 import { ASPECT_RULES } from "./rules";
 import {
     AspectRule,
+    ContactSummary,
     DailyScoreResult,
     DailyScores,
     Impact,
+    PlanetContact,
     PlanetInfluence,
     RawScores,
     ResolvedRule,
@@ -133,6 +135,7 @@ export function buildImpacts(hit: AspectHit, rule: ResolvedRule): Impact[] {
             priority: rule.priority,
             reason,
             title: rule.title,
+            description: rule.description,
         });
     }
 
@@ -339,6 +342,7 @@ export function summarizePlanetInfluence(impacts: Impact[], contactLimit = 3): P
                 strength: impact.strength,
                 value: impact.value,
                 title: impact.title,
+                description: impact.description,
             }));
 
         return {
@@ -349,6 +353,19 @@ export function summarizePlanetInfluence(impacts: Impact[], contactLimit = 3): P
             contacts,
         };
     }).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+}
+
+/** One contact, flattened for the wire. The single definition of that shape. */
+export function toContactSummary(contact: PlanetContact): ContactSummary {
+    return {
+        id: contact.id,
+        transit: contact.transit,
+        natal: contact.natal,
+        aspect: contact.aspect,
+        orb: Math.round(contact.orb * 10) / 10,
+        exactness: Math.round(contact.strength * 100),
+        supportive: contact.value >= 0,
+    };
 }
 
 /* ============================================================

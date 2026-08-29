@@ -5,13 +5,15 @@ import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageU
 import { ZodiacSign } from "../../utils/natalUtils";
 import { getLLMJson, parseLLMJson } from "../../utils/stringUtils";
 import { toResponseJsonSchema } from "../../utils/zodResponse";
-import { MAX_ORBS, orbStrength, Planet as AstroPlanet, Planet, PLANETS } from "../astro";
+import { MAX_ORBS, MoonPhase, NatalChart, orbStrength, Planet as AstroPlanet, Planet } from "../astro";
 import { ASPECT_STRENGTH } from "../dailyScore/factors";
-import { DailyScoreResult, PlanetInfluence as PlanetWeight } from "../dailyScore/types";
+import { DailyScoreResult } from "../dailyScore/types";
 import { getMoonPhase } from "../transits";
 import { ASPECT_PROFILES } from "./aspectProfiles";
 import { PLANET_PROFILES } from "./planetProfiles";
+import { buildReaderBlock, Reader } from "./reader";
 import { SIGN_PROFILES } from "./signProfiles";
+import { REASON_RULES, VOICE_RULES } from "./voice";
 
 // ============================================================
 // ADVANCED ASTRO ENGINE
@@ -423,26 +425,48 @@ export const MOON_SIGN_INFLUENCE: Record<ZodiacSign, string> = {
     pisces: "Sensitivity and intuition become more noticeable. Subtle emotions and unspoken signals may be easier to recognize.",
 };
 
-export const MOON_PHASE_INFLUENCE: Record<string, string> = {
-    "New Moon": "A good time for quiet beginnings, setting intentions and creating space for something new.",
+/**
+ * Keyed by `MoonPhase` rather than `string`, so a rename of the enum is a compile
+ * error here instead of a silent `undefined` interpolated into the prompt.
+ */
+export const MOON_PHASE_INFLUENCE: Record<MoonPhase, string> = {
+    newMoon: "A good time for quiet beginnings, setting intentions and creating space for something new.",
 
-    "Waxing Crescent": "Momentum is gradually building. Small actions today can create meaningful progress.",
+    waxingCrescent: "Momentum is gradually building. Small actions today can create meaningful progress.",
 
-    "First Quarter": "Today's energy favors decisions, action and overcoming small obstacles instead of waiting.",
+    firstQuarter: "Today's energy favors decisions, action and overcoming small obstacles instead of waiting.",
 
-    "Waxing Gibbous":
+    waxingGibbous:
         "Progress comes through patience and refinement. Finishing details may be more rewarding than starting something new.",
 
-    "Full Moon":
+    fullMoon:
         "Feelings and situations become more visible. What has been developing beneath the surface may become easier to understand.",
 
-    "Waning Gibbous": "Reflection and sharing become more valuable. Recent experiences can offer useful perspective.",
+    waningGibbous: "Reflection and sharing become more valuable. Recent experiences can offer useful perspective.",
 
-    "Last Quarter":
+    lastQuarter:
         "Letting go of unnecessary pressure creates room for better decisions. Adjustment is often more useful than persistence.",
 
-    "Waning Crescent":
+    waningCrescent:
         "Slowing down, resting and reflecting may feel more natural than pushing forward. Give yourself space before the next beginning.",
+};
+
+/**
+ * The phase written the way a person says it. The enum is the wire format and the join
+ * key; this is what goes into a prompt, because "fullMoon" reads to the model as an
+ * identifier and "Full Moon" reads as the sky.
+ *
+ * Never send this to the client — the app localizes the enum itself.
+ */
+export const MOON_PHASE_LABEL: Record<MoonPhase, string> = {
+    newMoon: "New Moon",
+    waxingCrescent: "Waxing Crescent",
+    firstQuarter: "First Quarter",
+    waxingGibbous: "Waxing Gibbous",
+    fullMoon: "Full Moon",
+    waningGibbous: "Waning Gibbous",
+    lastQuarter: "Last Quarter",
+    waningCrescent: "Waning Crescent",
 };
 
 export interface DominantPlanet {
@@ -529,15 +553,13 @@ export function buildPrompt(input: {
     analysis: ReturnType<typeof analyzeTransits>;
     /** The whole scoring result: the prompt needs the reasons, not only the numbers. */
     score: DailyScoreResult;
-    sunSign: string;
-    moonSign: string;
+    /** The reader's own chart, so a contact can name the natal point's sign. */
+    birthChart: NatalChart;
     language: string;
-    relationshipStatus?: string;
-    priorities?: string[];
-    /** Per-body weights from the engine. The model interprets them, never rescores them. */
-    planets: PlanetWeight[];
+    /** The one description of the reader every prompt shares. */
+    readerBlock: string;
 }) {
-    const { analysis, sunSign, moonSign, language, relationshipStatus, priorities } = input;
+    const { analysis, language } = input;
 
     const { themes, energy, dominantPlanets, dominantAspects, behavior, guidance, opportunities, challenges } =
         analysis.context;
@@ -547,51 +569,37 @@ export function buildPrompt(input: {
     const { loveScore, careerScore, healthScore, moodScore, overallScore } = input.score.scores;
 
     /**
-     * Orb and strength are here so the model can tell an aspect 0.2° from exact apart
-     * from one about to leave orb. Flattened to text they read identically, yet only
-     * one of them is worth calling today's dominant influence.
-     */
-    const bodies = input.planets
-        .map((planet) => {
-            const profile = PLANET_PROFILES[planet.name];
-
-            const contacts =
-                planet.contacts.length > 0
-                    ? planet.contacts
-                          .map(
-                              (contact) =>
-                                  `  - id: ${contact.id} | ${contact.reason} | "${
-                                      contact.title
-                                  }" | orb ${contact.orb.toFixed(1)}°, exactness ${Math.round(
-                                      contact.strength * 100
-                                  )}%, ${contact.value >= 0 ? "supportive" : "difficult"}`
-                          )
-                          .join("\n")
-                    : "  - none — this body makes no contact with the chart today";
-
-            return `
-${profile.displayName} (id: ${planet.name})
-Weight today: ${planet.score}/100, from ${planet.aspects} aspect${planet.aspects === 1 ? "" : "s"}
-Meaning: ${profile.description}
-Keywords: ${profile.keywords.join(", ")}
-Today's contacts:
-${contacts}`;
-        })
-        .join("\n");
-
-    /**
      * The specific transits behind today's numbers, ordered by narrative interest
      * rather than magnitude. This is what stops the horoscope from being generic:
      * these aspects are this user's, not the day's.
      */
     const personalTransits = input.score.breakdown.top
-        .map(
-            (impact) =>
-                `- ${impact.reason} — ${impact.title} (${impact.area}, ${impact.value >= 0 ? "supportive" : "difficult"})`
-        )
+        .map((impact) => {
+            /**
+             * The natal point's own sign, so the contact is about this chart rather than
+             * about the aspect in general — Saturn on a Gemini Moon and Saturn on a
+             * Scorpio Moon are not the same day. Absent only for the Ascendant of a
+             * reader with no birth time, where naming a sign would be a fabrication.
+             */
+            const natalSign = input.birthChart[impact.natal]?.sign;
+
+            const contact = natalSign ? `${impact.reason} in ${natalSign}` : impact.reason;
+
+            return `- ${contact} — ${impact.title} (${impact.area}, ${impact.value >= 0 ? "supportive" : "difficult"})
+  ${impact.description}`;
+        })
         .join("\n");
 
     return `
+==================================================
+LANGUAGE AND FORM OF ADDRESS
+==================================================
+
+${language}
+
+This governs every field you return. It is repeated at the end; check it again before you
+answer.
+
 You are writing a premium daily horoscope for a modern astrology application.
 
 Your task is to translate today's astrological influences into a believable, engaging and realistic description of the user's day.
@@ -604,24 +612,25 @@ It should feel as though it was written specifically for today's unique astrolog
 GOAL
 ==================================================
 
-Write a horoscope that is:
+Tell this person what today is likely to be like for them, and what to do about it.
 
-- natural
-- believable
-- emotionally intelligent
-- socially realistic
-- conversational
-- immersive
-- observational
-- easy to visualize
+They should finish it thinking "yes, that sounds like a day I could have" — and know, on
+one read, what it means for them. Not admire the writing. Not read a sentence twice.
 
-The reader should think:
+Describe situations rather than states of mind: what happens, who says what, what drags.
+The feelings follow from those and rarely need naming.
 
-"This genuinely sounds like the kind of day I could have."
+==================================================
+HOW TO WRITE IT
+==================================================
 
-Describe situations rather than abstract emotions.
+${VOICE_RULES}
 
-Whenever possible, show emotions through actions, conversations, routines, choices and interactions.
+--------------------------------------------------
+EXPLANATION FIELDS ("reason")
+--------------------------------------------------
+
+${REASON_RULES}
 
 ==================================================
 ASTROLOGY DRIVES THE STORY
@@ -661,29 +670,19 @@ Favor consistency over completeness.
 
 Use the following priority:
 
-1. Dominant aspects
+1. This person's transits today — what today's sky is doing to THEIR chart
 
-2. Dominant planet
+2. The life areas those transits land in, and their scores
 
-3. Overall atmosphere
+3. The dominant planet and the overall atmosphere — the texture the transits arrive into
 
-4. Moon sign
+4. Moon sign and Moon phase
 
-5. Moon phase
+5. Everything else: themes, energy profile, behavior tendencies, guidance
 
-6. Dominant themes
-
-7. Energy profile
-
-8. Behavior tendencies
-
-9. Guidance
-
-10. Opportunities
-
-11. Challenges
-
-12. Life scores
+Levels 3 to 5 describe the day everyone in this timezone is having. Level 1 is the only
+thing that makes this text theirs. Where they disagree, level 1 wins and the rest becomes
+the background it is.
 
 ==================================================
 EVERY DAY SHOULD FEEL DIFFERENT
@@ -740,74 +739,6 @@ A Full Moon should not resemble a Waning Crescent.
 The astrology should shape the narrative itself, not only the mood.
 
 ==================================================
-WRITING STYLE
-==================================================
-
-Write like an excellent lifestyle columnist.
-
-The writing should feel:
-
-- modern
-
-- human
-
-- confident
-
-- grounded
-
-- emotionally believable
-
-- relatable
-
-Prefer:
-
-- realistic situations
-
-- everyday observations
-
-- practical consequences
-
-- believable dialogue
-
-- subtle emotional realism
-
-Show rather than explain.
-
-Instead of saying:
-
-"You feel uncertain."
-
-Describe why.
-
-Example:
-
-"You may realize that two different people expect different things from you."
-
-Instead of:
-
-"You become more confident."
-
-Describe the event that naturally creates confidence.
-
-Avoid:
-
-- mystical language
-
-- spiritual language
-
-- therapy language
-
-- motivational language
-
-- philosophy
-
-- literary metaphors
-
-- clichés
-
-- exaggerated drama
-
-==================================================
 ASTROLOGICAL STATE
 ==================================================
 
@@ -815,9 +746,12 @@ The following interpretation represents today's complete astrological picture.
 
 Treat it as the primary source of truth.
 
-Never mention astrology directly.
+Never mention astrology directly in the narrative fields — the horoscope itself, the
+life-area insights, the Moon note, the opportunity and the watch-out. There, translate
+these influences into believable everyday experiences.
 
-Instead, translate these influences into believable everyday experiences.
+The "reason" fields are the exception and are governed by their own rules below. They
+exist to name the astrology, and a reason that talks around it has failed.
 
 Do not describe every section independently.
 
@@ -833,7 +767,7 @@ Moon sign:
 ${analysis.moon.sign}
 
 Moon phase:
-${analysis.moon.phase}
+${MOON_PHASE_LABEL[analysis.moon.phase]}
 
 Lunar influence:
 ${analysis.moon.influence}
@@ -867,20 +801,6 @@ ${dominantPlanet.profile.themes.join(", ")}
 Keywords:
 ${dominantPlanet.profile.keywords.join(", ")}
 
-Behavior
-
-Communication:
-${dominantPlanet.profile.expression.communication.join(", ")}
-
-Relationships:
-${dominantPlanet.profile.expression.relationships.join(", ")}
-
-Work:
-${dominantPlanet.profile.expression.work.join(", ")}
-
-Wellbeing:
-${dominantPlanet.profile.expression.wellbeing.join(", ")}
-
 Guidance
 
 Embrace:
@@ -900,7 +820,7 @@ DOMINANT ASPECTS
 --------------------------------------------------
 
 ${dominantAspects
-    .slice(0, 3)
+    .slice(0, 1)
     .map(
         (aspect, index) => `
 Aspect ${index + 1}
@@ -1018,18 +938,6 @@ LIKELY CHALLENGES
 ${challenges.join("\n")}
 
 --------------------------------------------------
-EXAMPLE EVERYDAY SITUATIONS
---------------------------------------------------
-
-These are examples of situations that naturally fit today's astrology.
-
-Use them as inspiration.
-
-Do not copy them literally.
-
-${analysis.observations.join("\n")}
-
---------------------------------------------------
 THIS PERSON'S TRANSITS TODAY
 --------------------------------------------------
 
@@ -1067,68 +975,6 @@ Overall:
 ${overallScore}/100
 
 ==================================================
-USER CONTEXT
-==================================================
-
-Sun sign:
-
-${sunSign}
-
-Moon sign:
-
-${moonSign}
-
-Relationship status:
-
-${relationshipStatus ?? "unknown"}
-
-Priorities:
-
-${priorities?.join(", ") ?? "none"}
-
-Do not mention the user's Sun sign, Moon sign or relationship status directly.
-
-If the user's priorities naturally align with today's astrology, gently incorporate them.
-
-Never force them into the narrative.
-
-==================================================
-TODAY'S PLANETS
-==================================================
-
-Besides the horoscope you also write one interpretation per planetary body, for the
-panel the reader opens from the horoscope. Same day, same voice, same context — which
-is why it is written here rather than in a request of its own.
-
-Each body carries a score from 0–100 describing how active it is TODAY in this chart.
-The score measures importance, not positivity. A high score means strong influence,
-not a good day. A score near zero means the body is largely inactive today.
-
-Never mention the score. Never mention numbers.
-
-Every contact carries an orb and an exactness percentage. Exactness describes how
-precisely the contact lands today:
-
-High exactness (roughly 80–100%) means the influence is at its peak right now. Write
-about it as something clearly present today.
-
-Medium exactness (roughly 40–80%) means it is building or fading. Write about it as a
-background influence rather than the main event.
-
-Low exactness (below roughly 40%) means it is barely in effect. Mention it only if
-nothing else is happening for that body.
-
-When one body has several contacts, let the most exact one lead the description, and
-use the others only where they genuinely change the picture. Never state the orb or
-the percentage — translate them into how present the influence feels.
-
-Each contact is listed as:
-
-  id | English label | "English title" | orb, exactness, direction
-
-${bodies}
-
-==================================================
 OUTPUT
 ==================================================
 
@@ -1140,9 +986,7 @@ Return ONLY valid JSON.
         "description": "string"
     },
     "moon": {
-        "phase": "string",
-        "insight": "string",
-        "reason": "string"
+        "insight": "string"
     },
     "insights": {
         "love": {
@@ -1189,19 +1033,10 @@ Return ONLY valid JSON.
             "string"
         ]
     },
-    "deepInsight": "string",
-    "planets": [
-        {
-            "name": "sun",
-            "description": "string",
-            "reason": "string",
-            "contacts": [
-                {
-                    "id": "string",
-                    "title": "string"
-                }
-            ]
-        }
+    "deepInsight": [
+        "string",
+        "string",
+        "string"
     ]
 }
 
@@ -1213,14 +1048,11 @@ Field requirements:
 - overview.description:
   One concise summary of today's overall energy (max 180 characters).
 
-- moon.phase:
-  Current Moon phase (e.g. "Waxing Gibbous").
-
 - moon.insight:
-  Explain how today's Moon placement may be experienced (max 150 characters).
-
-- moon.reason:
-  Explain WHY today's Moon sign and phase create this influence (max 150 characters).
+  One text, 2-3 sentences, max 240 characters: how today's Moon placement may be
+  experienced AND why today's Moon sign and phase create that influence. One flowing
+  note, not an observation followed by its explanation - never label the two halves and
+  never write it as two separate statements glued together.
 
 - insights.*.score:
   Integer between 0 and 100.
@@ -1229,7 +1061,10 @@ Field requirements:
   A practical, specific insight for that life area (max 150 characters).
 
 - insights.*.reason:
-  Explain the astrological reason behind the insight (max 150 characters).
+  Why this area scores the way it does today. ONE OR TWO SHORT SENTENCES, max 130
+  characters — this sits under a number on a screen, not in an article. Follow the
+  explanation rules above. Different areas get different reasons: if love and career would
+  come out with the same sentence, at least one of them is wrong.
 
 - opportunity.description:
   One practical opportunity, activity or recommendation for today (max 150 characters).
@@ -1248,27 +1083,16 @@ Field requirements:
   ["Arguments", "Overspending", "Procrastination", "Impulsive decisions"]
 
 - deepInsight:
-  A detailed horoscope with multiple paragraphs explaining today's astrological influences, practical implications and guidance.
+  The long read: what today is like for them, where it will show up, and what to do
+  differently. It has room, so use it for more situations and sharper advice — never for
+  longer sentences or a bigger vocabulary.
 
-- planets:
-  Exactly one object for every planet listed under TODAY'S PLANETS, in the same order.
-  Use the exact id as "name". Never return the score, the orb or the exactness.
-  Never invent contacts: return exactly the ones listed for that body, in the same
-  order, and copy each "id" character for character. A body with no contacts gets an
-  empty "contacts" array.
+  Move somewhere across it. Each paragraph carries the reader forward; one that restates
+  the last in different words is the failure to watch for.
 
-- planets[].description:
-  Exactly 3 paragraphs separated by a blank line, 600–1000 characters in total, about
-  TODAY only. First what the influence does in everyday life, then why it is stronger
-  or weaker than usual. Never name aspects, signs or astrological jargon here.
-
-- planets[].reason:
-  Exactly 2 paragraphs separated by a blank line, 350–650 characters in total. Explain
-  the mechanism behind today's influence in plain, everyday language.
-
-- planets[].contacts[].title:
-  Translate the English title. It is a caption shown next to the numbers, not prose:
-  a short headline, never longer than the original and never a sentence.
+  ONE PARAGRAPH PER ARRAY ENTRY, 3-5 entries. Never put a line break inside an entry
+  and never return the whole horoscope as a single entry - the array IS the paragraph
+  structure, and one long entry renders as one wall of text.
 
 Do not return markdown.
 
@@ -1282,215 +1106,78 @@ Return only the JSON object.
 HOROSCOPE
 ==================================================
 
-Write a horoscope consisting of 6–8 sentences.
+ONE THEME, THEN ANGLES ON IT
 
-Split it into 2–3 short paragraphs.
+Before you write anything, decide what today is ABOUT for this reader — one sentence,
+taken from the strongest of their transits. Something like "you badly want to move
+something forward, and the risk is that you push yourself too hard."
 
-Separate paragraphs with one blank line.
+That is the spine. Everything else in the horoscope is an angle on it: where it shows up,
+what gets in its way, what to do about it. A paragraph that introduces a new subject
+instead of turning that one over is the failure this rule exists for — cut it and write
+the missing angle instead.
 
-The horoscope should read like a believable story about today's experiences.
+The commonest way this goes wrong: health, then money, then growth, then a partner, then
+freedom, then boundaries, then rest. Seven subjects in four paragraphs, and the reader
+finishes without knowing what today is about. Two or three areas at most, and each one has
+to be the same theme seen from a different side.
 
-It should feel personal without pretending to know facts about the user's life.
-
-Describe situations that many people genuinely experience.
-
-The situations should become unique because of today's astrology.
+The "overview.description" field states the theme plainly. "deepInsight" develops it. They
+must be the same idea, not two different readings of the day.
 
 --------------------------------------------------
 BUILD THE DAY
 --------------------------------------------------
 
-Beginning
+Open with the theme, in words the reader recognises from their own life.
 
-Introduce today's atmosphere.
+Then the friction: what pushes back against it. Say where they will actually notice it —
+at home, at work, in a conversation they have been putting off, in a message they are
+waiting for.
 
-Allow the reader to immediately recognize the type of day.
+Then one more angle, usually a second area of life, still on the same theme.
 
-Middle
+Close by turning the theme into a choice. Not a summary, not encouragement, not a moral.
+Something they could act on before the day is over.
 
-Describe one or two realistic situations.
+Avoid dramatic endings and artificial optimism.
 
-These situations should naturally emerge from today's dominant themes, behavior tendencies, opportunities and challenges.
+--------------------------------------------------
+IF YOU CANNOT NAME IT, DO NOT SAY IT
+--------------------------------------------------
 
-Ending
+Only write something you could point at. "Your foundations", "deeper meaning", "helpful
+connections", "your path" name nothing — the reader cannot tell whether you mean their
+flat, their savings, their job or their relationship, and neither can you.
 
-Finish with a believable outcome, practical realization or quiet opportunity.
+If you know which one, say which one. If you do not, write about something you do know.
 
-Avoid dramatic endings.
+  Not: "you are building your foundations while keeping your freedom"
+  But: "you want the money side sorted without being tied to one place"
 
-Avoid artificial optimism.
+  Not: "you long for deeper meaning and analysis"
+  But: "you would rather understand why something went wrong than move straight on"
 
 --------------------------------------------------
 SHOW, DON'T EXPLAIN
 --------------------------------------------------
 
-Always describe situations before emotions.
+Describe the situation before the feeling. Instead of "you feel uncertain", write what
+made them uncertain — two people wanting different things, an answer that has not come.
 
-Instead of:
-
-"You feel uncertain."
-
-Describe the situation that creates uncertainty.
-
-Instead of:
-
-"You become more confident."
-
-Describe the event that naturally builds confidence.
-
-Instead of:
-
-"You feel stressed."
-
-Describe the responsibilities, conversations or events that realistically create pressure.
-
-Whenever possible:
-
-Actions → create emotions.
-
-Not:
-
-Emotions → create actions.
-
-==================================================
-REALISTIC EVERYDAY MOMENTS
-==================================================
-
-Prefer situations such as:
-
-• finishing postponed work
-
-• reorganizing plans
-
-• receiving unexpected appreciation
-
-• waiting for a message
-
-• clearing up a misunderstanding
-
-• making practical decisions
-
-• helping someone
-
-• unexpected invitations
-
-• solving everyday problems
-
-• improving routines
-
-• family responsibilities
-
-• financial choices
-
-• learning something useful
-
-• rediscovering an old idea
-
-The situations should feel ordinary but memorable.
+Actions cause feelings, not the other way round.
 
 ==================================================
 NARRATIVE DIVERSITY
 ==================================================
 
-Avoid repeatedly creating horoscopes about:
+Avoid defaulting to overthinking, hidden meanings, reading between the lines, emotional
+sensitivity, misread conversations or analysing relationships. Those belong to days whose
+astrology actually points there, and they are where this text drifts when nothing stops it.
 
-• overthinking
-
-• hidden meanings
-
-• reading between the lines
-
-• emotional sensitivity
-
-• misunderstanding conversations
-
-• analyzing relationships
-
-• emotional processing
-
-These themes should appear only when today's astrology strongly supports them.
-
-Different astrology should naturally create different kinds of days.
-
-Examples:
-
-• productive
-
-• practical
-
-• social
-
-• romantic
-
-• adventurous
-
-• energetic
-
-• reflective
-
-• disciplined
-
-• playful
-
-• organized
-
-• spontaneous
-
-The astrology should determine which kind of day today's horoscope becomes.
-
-==================================================
-WRITING QUALITY
-==================================================
-
-Write like an experienced journalist or lifestyle columnist.
-
-Not like:
-
-• an astrologer
-
-• a therapist
-
-• a philosopher
-
-• a motivational speaker
-
-Avoid:
-
-• clichés
-
-• vague encouragement
-
-• generic self-help
-
-• spiritual language
-
-• mystical wording
-
-• therapy terminology
-
-• literary metaphors
-
-• exaggerated emotions
-
-Vary sentence openings.
-
-Vary sentence lengths.
-
-Some sentences may be short.
-
-Some may be more descriptive.
-
-Avoid repeatedly beginning sentences with:
-
-"You may..."
-
-"You might..."
-
-"Today..."
-
-"It may..."
-
-The writing should feel naturally human.
+Different astrology has to produce a different kind of day — productive, practical, social,
+romantic, restless, reflective, disciplined, playful, spontaneous. Let today's chart decide
+which one this is.
 
 ==================================================
 MOON INSIGHT
@@ -1652,6 +1339,8 @@ The "Do" recommendation should reflect today's opportunities.
 
 The "Avoid" recommendation should reflect today's challenges.
 
+${input.readerBlock}
+
 ==================================================
 FINAL QUALITY CHECK
 ==================================================
@@ -1660,7 +1349,7 @@ Before returning the JSON, silently verify that:
 
 • the horoscope clearly reflects today's astrological interpretation
 
-• the dominant planet and dominant aspects noticeably influence the narrative
+• this person's own transits, not the general sky, decide what the day is about
 
 • the Moon influences the emotional atmosphere
 
@@ -1678,13 +1367,17 @@ Before returning the JSON, silently verify that:
 
 • the horoscope could not reasonably fit a different astrological day
 
+• take the two strongest sentences and imagine a reader with the same chart but the
+  opposite decision style, career stage and relationship status. If both stay equally
+  true, the horoscope is not finished — rewrite them against the reader you were given
+
 • the writing feels natural and contemporary
 
 • no sentence sounds like generic self-help
 
 • no sentence sounds mystical or spiritual
 
-• no astrology is mentioned directly
+• no astrology is named in the narrative fields, and every "reason" field does name it
 
 • the ending feels calm, believable and satisfying
 
@@ -1705,7 +1398,7 @@ If different influences conflict, create a believable balance instead of ignorin
 The reader should immediately feel that today's horoscope is unique.
 
 Respond only in:
-${language}.
+${language}
 `;
 }
 
@@ -1727,9 +1420,15 @@ export interface DailyInsightContent {
         description: string;
     };
     deepInsight: string[];
+    /**
+     * The Moon note for the day: what it is like and why, as one text.
+     *
+     * Deliberately not split into an insight and a reason - at this length the reason
+     * only ever restated the insight, and the Moon Today screen quotes this whole note
+     * as the teaser it continues from.
+     */
     moon: {
         insight: string;
-        reason: string;
     };
     opportunity: {
         description: string;
@@ -1746,70 +1445,9 @@ export interface DailyInsightContent {
             reason: string;
         }
     >;
-    planets: {
-        name: Planet;
-        description: string;
-        reason: string;
-        contacts: Record<
-            string,
-            {
-                id: string;
-                title: string;
-            }
-        >;
-    }[];
 }
 
 export type GenerationStatus = "absent" | "pending" | "ready" | "failed";
-
-export interface DailyInsight {
-    overview: {
-        title: string;
-        description: string;
-    };
-    moon: {
-        phase: string;
-        insight: string;
-        reason: string;
-    };
-    insights: {
-        love: {
-            score: number;
-            insight: string;
-            reason: string;
-        };
-        career: {
-            score: number;
-            insight: string;
-            reason: string;
-        };
-        health: {
-            score: number;
-            insight: string;
-            reason: string;
-        };
-        mood: {
-            score: number;
-            insight: string;
-            reason: string;
-        };
-        overall: {
-            score: number;
-            insight: string;
-            reason: string;
-        };
-    };
-    opportunity: {
-        description: string;
-        examples: string[];
-    };
-    watchOut: {
-        description: string;
-        examples: string[];
-    };
-    deepInsight: string;
-    debug?: any;
-}
 
 /**
  * One contact's text, in the user's language.
@@ -1861,7 +1499,7 @@ const wordingSchema = z.object({
  */
 const answerSchema = z.object({
     overview: z.object({ title: z.string(), description: z.string() }),
-    moon: z.object({ phase: z.string(), insight: z.string(), reason: z.string() }),
+    moon: z.object({ insight: z.string() }),
     insights: z.object({
         love: wordingSchema,
         career: wordingSchema,
@@ -1871,15 +1509,12 @@ const answerSchema = z.object({
     }),
     opportunity: z.object({ description: z.string(), examples: z.array(z.string()) }),
     watchOut: z.object({ description: z.string(), examples: z.array(z.string()) }),
-    deepInsight: z.string(),
-    planets: z.array(
-        z.object({
-            name: z.enum(PLANETS),
-            description: z.string(),
-            reason: z.string(),
-            contacts: z.array(z.object({ id: z.string(), title: z.string() })),
-        })
-    ),
+    /**
+     * Paragraphs as entries, not one string with blank lines in it: asked for as a
+     * single string the decoder returned one unbroken paragraph on most days, and the
+     * structure only survived when it felt like it.
+     */
+    deepInsight: z.array(z.string()),
 });
 
 /** List price per million tokens, so the logged cost is what was actually charged. */
@@ -1898,13 +1533,9 @@ export async function generateDailyInsight(input: {
      * the numbers come from modules/dailyScore, which is deterministic and tested.
      */
     score: DailyScoreResult;
-    planets: PlanetWeight[];
-    sunSign: string;
-    moonSign: string;
+    /** The whole reader. Their chart grounds the transits, the rest shapes the reading. */
+    reader: Reader;
     languageIso: string;
-    relationshipStatus?: string;
-    priorities?: string[];
-    goals?: string[];
 }): Promise<{
     content: DailyInsightContent | null;
     usage: {
@@ -1929,12 +1560,11 @@ export async function generateDailyInsight(input: {
     const prompt = buildPrompt({
         analysis,
         score: input.score,
-        planets: input.planets,
-        sunSign: input.sunSign,
-        moonSign: input.moonSign,
-        relationshipStatus: input.relationshipStatus,
-        priorities: input.priorities,
-        language: language ? buildPromptLanguageRule(language) : input.languageIso,
+        birthChart: input.reader.birthChart,
+        // Built from the day's strongest impacts, so the placements it names are the ones
+        // today is actually landing on rather than the whole chart.
+        readerBlock: buildReaderBlock(input.reader, input.score.breakdown.top),
+        language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
     });
 
     const startedAt = Date.now();
@@ -1943,6 +1573,14 @@ export async function generateDailyInsight(input: {
         model: MODEL,
         contents: prompt,
         config: {
+            /**
+             * Thinking off. Measured on the daily prompt: the default budget spends
+             * 2 000–9 500 hidden tokens, costs 40 % more and takes 48–64 s instead of 27 s,
+             * and the only thing it bought was reaching back for the address rule buried at
+             * the end of the prompt. That rule now sits at the top as well, so there is
+             * nothing left for it to buy.
+             */
+            thinkingConfig: { thinkingBudget: 0 },
             responseMimeType: "application/json",
             responseJsonSchema: toResponseJsonSchema(answerSchema),
         },
@@ -1951,7 +1589,14 @@ export async function generateDailyInsight(input: {
     const text = response.text ?? "";
 
     const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
-    const outputTokens = response.usageMetadata?.candidatesTokenCount ?? 0;
+    /**
+     * Thinking tokens are billed at the output rate but are not part of
+     * `candidatesTokenCount`, so leaving them out under-reported every generation by
+     * 30–45 % while the default budget was on. Counted here so the audit row is what
+     * was actually charged rather than what was visible.
+     */
+    const outputTokens =
+        (response.usageMetadata?.candidatesTokenCount ?? 0) + (response.usageMetadata?.thoughtsTokenCount ?? 0);
 
     const usage = {
         requestId: response.responseId ?? "",
@@ -2001,12 +1646,10 @@ export async function generateDailyInsight(input: {
         usage: { ...usage, output: getLLMJson(text) },
         content: {
             overview: result.overview,
-            // Paragraphs are split here so no screen has to parse "\n".
-            deepInsight: result.deepInsight
-                .split(/\n\s*\n/u)
-                .map((paragraph) => paragraph.trim())
-                .filter(Boolean),
-            moon: { insight: result.moon.insight, reason: result.moon.reason },
+            // Trimmed and emptied out here so no screen has to defend against a blank
+            // paragraph the model padded the array with.
+            deepInsight: result.deepInsight.map((paragraph) => paragraph.trim()).filter(Boolean),
+            moon: { insight: result.moon.insight },
             opportunity: result.opportunity,
             watchOut: result.watchOut,
             insights: {
@@ -2016,30 +1659,6 @@ export async function generateDailyInsight(input: {
                 mood: { insight: result.insights.mood.insight, reason: result.insights.mood.reason },
                 overall: { insight: result.insights.overall.insight, reason: result.insights.overall.reason },
             },
-            /**
-             * Driven by the engine's list, not the model's: a body or contact the model
-             * dropped, duplicated or renamed still gets an entry, falling back to the
-             * English wording rather than disappearing from the panel.
-             */
-            planets: input.planets.map((planet) => {
-                const written = result.planets?.find((entry) => entry.name === planet.name);
-
-                return {
-                    name: planet.name,
-                    description: written?.description ?? PLANET_PROFILES[planet.name].description,
-                    reason: written?.reason ?? planet.contacts.map((contact) => contact.reason).join(", "),
-                    contacts: Object.fromEntries(
-                        planet.contacts.map((contact) => [
-                            contact.id,
-                            {
-                                id: contact.id,
-                                title:
-                                    written?.contacts?.find((entry) => entry.id === contact.id)?.title ?? contact.title,
-                            },
-                        ])
-                    ),
-                };
-            }),
         },
     };
 }

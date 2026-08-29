@@ -197,6 +197,20 @@
       "when": 1786141981928,
       "tag": "0027_perfect_hellion",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1786988375284,
+      "tag": "0028_futuristic_satana",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1788042202406,
+      "tag": "0029_uneven_silver_fox",
+      "breakpoints": true
     }
   ]
 }

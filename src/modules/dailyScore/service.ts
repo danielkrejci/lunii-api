@@ -5,7 +5,13 @@ import { FastifyInstance } from "fastify";
 import { AsyncTask, CronJob } from "toad-scheduler";
 
 import { calculateDailyScore } from ".";
-import { compatibilityPeopleScores, dailyInsights, profile as profileTable, transit } from "../../db/schema";
+import {
+    compatibilityPeopleScores,
+    dailyInsights,
+    moonInsights,
+    profile as profileTable,
+    transit,
+} from "../../db/schema";
 import { TransitAspects } from "../../utils/natalUtils";
 import { NatalChart, TransitChart } from "../astro";
 import { computeTransits, utcOffsetForDate } from "../transits";
@@ -310,7 +316,18 @@ export function createStuckGenerationsJob(db: Db) {
                 )
                 .returning({ date: compatibilityPeopleScores.date });
 
-            const stuck = insights.length + compatibility.length;
+            const moon = await db
+                .update(moonInsights)
+                .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
+                .where(
+                    and(
+                        eq(moonInsights.status, "pending"),
+                        lt(moonInsights.updatedAt, sql`now() - interval '5 minutes'`)
+                    )
+                )
+                .returning({ date: moonInsights.date });
+
+            const stuck = insights.length + compatibility.length + moon.length;
 
             if (stuck > 0) {
                 console.log("[CRON] Timed out", stuck, "stuck generation(s)");

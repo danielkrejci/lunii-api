@@ -20,6 +20,9 @@ import { NatalChart } from "../modules/astro";
 import { DailyOverviewResponse } from "../modules/compatibilityPeople/ai";
 import { CompatibilityResult, DailyCompatibilityResult } from "../modules/compatibilityPeople/types";
 import { DailyInsightContent, GenerationStatus } from "../modules/insights";
+import { PlanetInsightContent } from "../modules/insights/planets";
+import { MoonInsightContent } from "../modules/moon/ai";
+import { MoonVariant } from "../modules/moon/today";
 import { Gender, Relationship, TransitAspects, TransitPlanets, ZodiacSign } from "../utils/natalUtils";
 
 export const aiGenerations = pgTable("ai_generations", {
@@ -34,7 +37,9 @@ export const aiGenerations = pgTable("ai_generations", {
     requestId: text("request_id").notNull(),
     provider: text("provider").notNull(),
     model: text("model").notNull(),
-    type: text("type").$type<"dailyInsight" | "compatibilityPeople" | "personalityProfile">().notNull(),
+    type: text("type")
+        .$type<"dailyInsight" | "moonInsight" | "planetInsight" | "compatibilityPeople" | "personalityProfile">()
+        .notNull(),
     status: text("status").$type<"success" | "error">().notNull(),
     error: text("error"),
     input: jsonb("input").notNull(),
@@ -137,6 +142,81 @@ export const dailyInsights = pgTable(
         uniqueIndex("daily_insights_user_id_date_idx").on(table.userId, table.date),
         check(
             "daily_insights_ready_has_content",
+            sql`((${table.status} = 'ready' and ${table.content} is not null) or (${table.status} <> 'ready' and ${table.content} is null))`
+        ),
+    ]
+);
+
+export const moonInsights = pgTable(
+    "moon_insights",
+    {
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+        date: date("date", { mode: "string" }).notNull(),
+
+        /**
+         * Lifecycle of the generation, and deliberately its own — the daily horoscope
+         * runs on `daily_insights.updated_at` as an ownership token, and a second
+         * generation claiming that same row would invalidate a run already in flight.
+         *
+         * As there, `updated_at` doubles as the timeout for a run that died mid-flight,
+         * so nothing outside that lifecycle may write to this row and `$onUpdate` must
+         * stay off.
+         */
+        status: text("status").$type<GenerationStatus>().default("absent").notNull(),
+
+        /**
+         * Which prompt wrote the text. Stored rather than derived from today's phase:
+         * the copy is written once, and a hero layout that disagrees with the words
+         * under it is worse than one that is a few hours stale.
+         */
+        variant: text("variant").$type<MoonVariant>().notNull(),
+
+        /** The whole AI-written half. Null until generated, complete once it is. */
+        content: jsonb("content").$type<MoonInsightContent>(),
+
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    },
+    (table) => [
+        uniqueIndex("moon_insights_user_id_date_idx").on(table.userId, table.date),
+        check(
+            "moon_insights_ready_has_content",
+            sql`((${table.status} = 'ready' and ${table.content} is not null) or (${table.status} <> 'ready' and ${table.content} is null))`
+        ),
+    ]
+);
+
+export const planetInsights = pgTable(
+    "planet_insights",
+    {
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+        date: date("date", { mode: "string" }).notNull(),
+
+        /**
+         * Lifecycle of the generation, and deliberately its own — the horoscope runs on
+         * `daily_insights.updated_at` as an ownership token, and a panel generation
+         * claiming that same row would invalidate a run already in flight.
+         *
+         * As there, `updated_at` doubles as the timeout for a run that died mid-flight,
+         * so nothing outside that lifecycle may write to this row and `$onUpdate` must
+         * stay off.
+         */
+        status: text("status").$type<GenerationStatus>().default("absent").notNull(),
+
+        /** The whole AI-written half. Null until generated, complete once it is. */
+        content: jsonb("content").$type<PlanetInsightContent>(),
+
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    },
+    (table) => [
+        uniqueIndex("planet_insights_user_id_date_idx").on(table.userId, table.date),
+        check(
+            "planet_insights_ready_has_content",
             sql`((${table.status} = 'ready' and ${table.content} is not null) or (${table.status} <> 'ready' and ${table.content} is null))`
         ),
     ]
