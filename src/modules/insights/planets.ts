@@ -30,8 +30,12 @@ export interface PlanetInsightContent {
         /**
          * Keyed by contact id rather than positional: the wording was written for one
          * day's aspects, and a contact that has moved on must simply have no wording.
+         *
+         * `title` is the aspect's astrological name in the reader's language ("Tranzitní
+         * Saturn v kvadratuře k natálnímu Měsíci") — a name, not an interpretation. What
+         * it MEANS is `description`.
          */
-        contacts: Record<string, { id: string; title: string; description?: string }>;
+        aspects: Record<string, { id: string; title: string; description?: string }>;
     }[];
 }
 
@@ -153,6 +157,9 @@ EXPLANATION FIELDS ("reason")
 
 ${REASON_RULES}
 
+These rules govern every field except one. "planets[].contacts[].title" is the aspect's
+name, so it names the angle; nothing else in this answer does.
+
 ==================================================
 TODAY'S PLANETS
 ==================================================
@@ -228,8 +235,22 @@ Return ONLY valid JSON.
   Follow the explanation rules above — no aspect names here either.
 
 - planets[].contacts[].title:
-  Translate the English title. It is a caption shown next to the numbers, not prose:
-  a short headline, never longer than the original and never a sentence.
+  The aspect's NAME, translated: the second field of its line, the one that reads
+  "Transit <planet> <aspect> Natal <planet>".
+
+  Name both planets and the angle between them, in the reader's language, using the
+  ordinary name of each body as the naming rule above requires. This is the ONE field
+  that says the
+  geometry out loud — everything else in this answer hides it. Never replace it with a
+  mood, a theme or a poetic caption, and never translate the title in quotes instead:
+  that title is what the aspect MEANS, and its place is the description.
+
+  Keep it to the name. No verbs about the reader's day, no orb, no percentage, no
+  interpretation.
+
+  Czech, for shape only — write the equivalent in the reader's language:
+  "Tranzitní Saturn v kvadratuře k natálnímu Měsíci", "Tranzitní Venuše v trigonu k
+  natálnímu Slunci".
 
 - planets[].contacts[].description:
   90 to 130 characters, in two parts.
@@ -256,6 +277,7 @@ Return ONLY valid JSON.
   contact's description already said.
 
   Follow the explanation rules: name what the planets do, never the angle between them.
+  The angle belongs in the title and nowhere else.
 
 Do not return markdown.
 
@@ -387,7 +409,7 @@ export async function generatePlanetInsights(input: {
                     name: planet.name,
                     description: written?.description ?? PLANET_PROFILES[planet.name].description,
                     reason: written?.reason ?? planet.contacts.map((contact) => contact.reason).join(", "),
-                    contacts: Object.fromEntries(
+                    aspects: Object.fromEntries(
                         planet.contacts.map((contact) => {
                             const wording = written?.contacts?.find((entry) => entry.id === contact.id);
 
@@ -395,7 +417,10 @@ export async function generatePlanetInsights(input: {
                                 contact.id,
                                 {
                                     id: contact.id,
-                                    title: wording?.title ?? contact.title,
+                                    // The English name, not the English caption: a
+                                    // dropped entry has to fall back to the same kind of
+                                    // thing the field holds.
+                                    title: wording?.title ?? contact.reason,
                                     description: wording?.description ?? contact.description,
                                 },
                             ];

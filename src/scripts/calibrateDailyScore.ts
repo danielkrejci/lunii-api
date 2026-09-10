@@ -137,7 +137,7 @@ console.log("\nresulting overallScore with the CURRENT constants");
 console.log(`  ${describe(overallScores)}`);
 console.log(histogram(overallScores));
 
-console.log("\nvolatility (tunes LAYER_GAIN.slow; target median 4-6)");
+console.log("\nvolatility (tunes LAYER_GAIN.weekly and .daily; target median 12-18)");
 const sortedDeltas = [...dailyDeltas].sort((a, b) => a - b);
 console.log(
     `  |delta overallScore| day to day: median ${percentile(sortedDeltas, 0.5).toFixed(1)}  ` +

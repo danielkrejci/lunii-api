@@ -306,13 +306,26 @@ export function summarizePlanetWeight(impacts: Impact[]): Record<Planet, { weigh
 }
 
 /**
+ * How many contacts per body a screen and a prompt get.
+ *
+ * Six is not a taste call: measured over random charts, a body makes 3.2 aspects on an
+ * average day and stays at or under six on 99 % of them. So this is "everything it really
+ * makes", with a ceiling only so one freak day cannot flood a panel — where three used to
+ * cut a real aspect off two days in five.
+ *
+ * One number for every caller on purpose: the panel, the Moon screen and the prompts must
+ * see the same set, or the text gets written from aspects the reader cannot see.
+ */
+export const CONTACT_LIMIT = 6;
+
+/**
  * Per-body 0–100 scores for one day, strongest first.
  *
  * Each body is squashed against its own calibration, so the number means "loud for
  * this planet" rather than "loud compared to the Moon". Bodies making no aspect
  * today are included with a score of 0 — absence is information.
  */
-export function summarizePlanetInfluence(impacts: Impact[], contactLimit = 3): PlanetInfluence[] {
+export function summarizePlanetInfluence(impacts: Impact[], contactLimit = CONTACT_LIMIT): PlanetInfluence[] {
     const totals = summarizePlanetWeight(impacts);
 
     // Strongest single impact per body, so the contacts name the aspects that carry it.

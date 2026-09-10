@@ -3,8 +3,8 @@
     "version": "1.0.0",
     "type": "module",
     "scripts": {
-        "clean-install": "PYTHON=$(brew --prefix python@3.11)/bin/python3.11 pnpm install",
-        "reinstall": "rm -rf node_modules pnpm-lock.yaml && PYTHON=$(brew --prefix python@3.11)/bin/python3.11 pnpm install",
+        "clean-install": "npm_config_python=$(brew --prefix python@3.11)/bin/python3.11 pnpm install",
+        "reinstall": "rm -rf node_modules && npm_config_python=$(brew --prefix python@3.11)/bin/python3.11 pnpm install",
         "dev": "concurrently -k \"pnpm dev:api\" \"pnpm dev:tunnel\"",
         "dev:api": "tsx watch src/index.ts",
         "dev:tunnel": "cloudflared tunnel run --url http://localhost:3000 lunii-dev",
@@ -22,7 +22,8 @@
         "format": "oxfmt",
         "format:check": "oxfmt --check",
         "prepare": "husky",
-        "seed:transits": "tsx src/scripts/seedTransitsTable.ts"
+        "seed:transits": "tsx src/scripts/seedTransitsTable.ts",
+        "test:db": "RUN_DB_TESTS=1 tsx --test \"src/**/*.dbtest.ts\""
     },
     "dependencies": {
         "@aws-sdk/client-s3": "^3.1095.0",
@@ -72,7 +73,7 @@
         ]
     },
     "engines": {
-        "node": "22.x",
+        "node": "26.x",
         "pnpm": "11.x"
     },
     "packageManager": "pnpm@11.18.0"

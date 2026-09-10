@@ -50,6 +50,13 @@ export interface MoonInsightContent {
 
 export interface MoonContactText {
     id: string;
+    /**
+     * The aspect's astrological name in the reader's language: "Tranzitní Měsíc v
+     * kvadratuře k natálnímu Saturnu".
+     *
+     * A name, not an interpretation — it sits next to the orb and the exactness, where
+     * the reader is looking at the aspect itself. What it MEANS is `description`.
+     */
     title: string;
     /** What this contact does and what to do with it. Absent on older rows. */
     description?: string;
@@ -317,8 +324,22 @@ Return ONLY valid JSON.
   drop one. If no aspects are listed there, return an empty array.
 
 - contacts[].title:
-  Translate the English caption in quotes. It is a label shown next to the numbers, not
-  prose: a short headline, never longer than the original and never a sentence.
+  The aspect's NAME, translated: the second field of its line, the one that reads
+  "Transit <planet> <aspect> Natal <planet>".
+
+  Name both planets and the angle between them, in the reader's language, using the
+  ordinary name of each body as the naming rule above requires. This is the ONE field
+  that says the
+  geometry out loud — everything else in this answer hides it. Never replace it with a
+  mood, a theme or a poetic caption, and never translate the caption in quotes instead:
+  that caption is what the aspect MEANS, and its place is the description.
+
+  Keep it to the name. No verbs about the reader's day, no orb, no percentage, no
+  interpretation.
+
+  Czech, for shape only — write the equivalent in the reader's language:
+  "Tranzitní Měsíc v kvadratuře k natálnímu Saturnu", "Tranzitní Měsíc v trigonu k
+  natální Venuši".
 
 - contacts[].description:
   90 to 130 characters, in two parts.
@@ -345,6 +366,7 @@ Return ONLY valid JSON.
   contact's description already said.
 
   Follow the explanation rules: name what the planets do, never the angle between them.
+  The angle belongs in the title and nowhere else.
 
 - activities:
   Exactly 4 entries in each array, each 1–3 words. These are chips on a screen, not
@@ -374,6 +396,9 @@ Two rules on top of those, for this screen:
 
 Never name the aspects as jargon in "insight" — the reader should recognise the
 experience, not the geometry. The captions and the chips are labels, not prose.
+
+"contacts[].title" is the single exception in the whole answer: it is the aspect's name,
+so it names the geometry. Nothing else does.
 
 If the sign, the phase and the aspects pull in different directions, write a believable
 balance instead of ignoring any of them.
@@ -513,7 +538,9 @@ export async function generateMoonInsight(input: {
                     contact.id,
                     {
                         id: contact.id,
-                        title: parsed.data.contacts.find((entry) => entry.id === contact.id)?.title ?? contact.title,
+                        // The English name, not the English caption: a dropped entry has
+                        // to fall back to the same kind of thing the field holds.
+                        title: parsed.data.contacts.find((entry) => entry.id === contact.id)?.title ?? contact.reason,
                         description:
                             parsed.data.contacts.find((entry) => entry.id === contact.id)?.description ??
                             contact.description,

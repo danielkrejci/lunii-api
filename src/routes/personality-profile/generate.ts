@@ -246,6 +246,14 @@ ${input.language}`;
    ROUTE
 ============================================================ */
 
+/**
+ * Deliberately free, and deliberately the only generating route that is.
+ *
+ * This runs during onboarding, before a profile exists and therefore before anyone has
+ * a reason to care about credits. A reader who cannot finish signing up is worth far
+ * more than five of them. Its model cost stays unbilled on purpose — please do not
+ * "fix" that later.
+ */
 export default (async (fastify) => {
     await fastify.register(rateLimit, {
         max: 5,

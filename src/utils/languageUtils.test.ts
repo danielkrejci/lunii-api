@@ -45,6 +45,23 @@ describe("buildPromptLanguageRule", () => {
         assert.match(buildPromptLanguageRule(czech, "female"), /informal second person/u);
     });
 
+    /**
+     * The chat is the only caller that returns prose. Told to proofread "the JSON" it is
+     * being asked about something that does not exist, and given a nudge towards
+     * answering a person with an object.
+     */
+    it("names what is actually being proofread", () => {
+        assert.ok(czech);
+
+        assert.match(buildPromptLanguageRule(czech, "male"), /return the JSON/u);
+        assert.match(buildPromptLanguageRule(czech, "male", "json"), /return the JSON/u);
+
+        const prose = buildPromptLanguageRule(czech, "male", "prose");
+
+        assert.doesNotMatch(prose, /JSON/u);
+        assert.match(prose, /read it back once/u);
+    });
+
     it("asks for the polite register where the plain form would read as rude", () => {
         const japanese = getLanguageByIso("ja");
 

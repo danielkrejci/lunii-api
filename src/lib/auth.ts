@@ -46,7 +46,19 @@ const config = {
     },
     plugins: [
         expo(),
-        anonymous(),
+        anonymous({
+            /**
+             * Never delete the anonymous account on link.
+             *
+             * The app only ever upgrades through `linkSocial`, which keeps the same
+             * `user.id`, so better-auth's cleanup does not fire today — it is guarded on
+             * the new session belonging to a *different* user. But credits, unlocks and
+             * a subscription all hang off `user.id` and all cascade, so the day someone
+             * adds a `signIn.social()` while an anonymous session is live, the deletion
+             * would take paid-for balance with it. The row is cheap; the incident is not.
+             */
+            disableDeleteAnonymousUser: true,
+        }),
         customSession(async ({ user: sessionUser, session }) => {
             try {
                 const profileData = await db

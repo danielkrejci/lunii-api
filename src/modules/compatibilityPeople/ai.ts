@@ -7,71 +7,94 @@ import { parseLLMJson } from "../../utils/stringUtils";
 import { toResponseJsonSchema } from "../../utils/zodResponse";
 import { buildReaderBlock, Reader } from "../insights/reader";
 import { REASON_RULES, VOICE_RULES } from "../insights/voice";
-import { Category, INSIGHT_DIRECTIONS, RELATIONSHIP_CATEGORIES } from "./types";
+import { CompatibilityContact } from "./contacts";
+import { TransitBreakdown } from "./types";
 
-const overviewBlockSchema = z.object({
-    title: z.string(),
-    description: z.string(),
-    reason: z.string(),
-});
+/* ============================================================
+   WHAT IS STORED
+============================================================ */
 
 /**
- * Handed to the model as its response schema, so the decoder cannot emit anything that
- * does not fit — a single missing brace in one array element used to throw the whole
- * answer away. It is also the one definition of the shape: the type is derived from it
- * and the answer is validated against it on the way back.
+ * The whole AI-written half of a person's day.
+ *
+ * Deliberately the same shape as the daily horoscope: a short overview, the long read as
+ * paragraphs, one opportunity and one watch-out with chips, and one caption per aspect.
+ * The two screens are the same voice writing about the same day, and two different
+ * layouts for the same kind of reading is how they drift apart.
  */
-export const dailyOverviewSchema = z.object({
-    overview: z.string(),
-    positiveOverview: overviewBlockSchema,
-    negativeOverview: overviewBlockSchema,
-    insights: z.array(
-        z.object({
-            title: z.string(),
-            description: z.string(),
-            reason: z.string(),
-            category: z.enum(RELATIONSHIP_CATEGORIES),
-            direction: z.enum(INSIGHT_DIRECTIONS),
-        })
-    ),
+export interface CompatibilityInsightContent {
+    overview: {
+        title: string;
+        description: string;
+    };
+    /** Paragraphs. Split on the server so no screen has to parse "\n". */
+    deepInsight: string[];
+    opportunity: {
+        description: string;
+        examples: string[];
+    };
+    watchOut: {
+        description: string;
+        examples: string[];
+    };
+    /** What to actually do about today, for these two people. */
+    practicalAdvice: string;
+    /**
+     * One caption per aspect, in the reader's language.
+     *
+     * Keyed by contact id rather than positional: the wording was written for one day's
+     * aspects, and a contact that has moved on must simply have no wording.
+     */
+    aspects: Record<string, CompatibilityAspectText>;
+}
+
+export interface CompatibilityAspectText {
+    /** "reader_moon_square_venus" — the engine's key, echoed by the model. */
+    id: string;
+    /**
+     * The aspect's astrological name in the reader's language, and whose chart it lands
+     * on: "Venuše v trigonu k Venuši Anny".
+     *
+     * A name, not an interpretation — it sits next to the orb and the exactness, where
+     * the reader is looking at the aspect itself. What it MEANS is `description`.
+     */
+    title: string;
+    /** What this aspect is about and what to do with it today. */
+    description: string;
+}
+
+/**
+ * What the model is asked to return — not quite what gets stored. The aspects come back
+ * as an array and are turned into a record below, because models count badly on objects.
+ *
+ * Handed to the decoder as a response schema, so a malformed answer stops being possible
+ * instead of being caught after the fact.
+ */
+const answerSchema = z.object({
+    overview: z.object({ title: z.string(), description: z.string() }),
+    /**
+     * Paragraphs as entries, not one string with blank lines in it: asked for as a single
+     * string the decoder returns one unbroken paragraph on most days, and the structure
+     * only survives when it feels like it.
+     */
+    deepInsight: z.array(z.string()),
+    opportunity: z.object({ description: z.string(), examples: z.array(z.string()) }),
+    watchOut: z.object({ description: z.string(), examples: z.array(z.string()) }),
     practicalAdvice: z.string(),
+    aspects: z.array(z.object({ id: z.string(), title: z.string(), description: z.string() })),
 });
 
-export type DailyOverviewResponse = z.infer<typeof dailyOverviewSchema>;
-
-// export type DailyOverviewResponse = {
-//     overview: string;
-//     positiveOverview: {
-//         description: string;
-//         reason: string;
-//     };
-//     negativeOverview: {
-//         description: string;
-//         reason: string;
-//     };
-//     practicalAdvice: string;
-// };
-
-export type AiAspect = {
-    title: string;
-    category: Category;
-    description: string;
-    score: number;
-};
-
-export type DailyCompatibilityAiInput = {
+export type CompatibilityInsightInput = {
     score: number;
     modifier: number;
 
     positiveTotal: number;
     negativeTotal: number;
 
-    breakdown: {
-        emotional: number;
-        love: number;
-        communication: number;
-        motivation: number;
-    };
+    breakdown: TransitBreakdown;
+
+    /** Today's aspects to both charts, most exact first — what the text is written from. */
+    contacts: CompatibilityContact[];
 
     relationshipType: Relationship;
 
@@ -89,500 +112,349 @@ export type DailyCompatibilityAiInput = {
         sunSign: ZodiacSign;
         gender: Gender;
     };
-
-    positiveAspects: AiAspect[];
-    negativeAspects: AiAspect[];
 };
 
-function buildPrompt(language: string, readerBlock: string, input: DailyCompatibilityAiInput) {
-    return `
-                ==================================================
-        LANGUAGE AND FORM OF ADDRESS
-        ==================================================
-
-        ${language}
-
-        This governs every field you return. It is repeated at the end; check it again before you
-        answer.
-
-You are writing a daily compatibility interpretation for two people.
-
-        Your task is to interpret the provided astrological compatibility data for ONE specific day.
-
-        The interpretation must feel insightful, natural and personalized while remaining completely grounded in the supplied data.
-
-        Never invent influences that are not present.
-
-        ==================================================
-        OUTPUT
-        ==================================================
-
-        Return ONLY valid JSON in exactly this format:
-
-        {
-        "overview": "...",
-
-        "positiveOverview": {
-            "title": "...",
-            "description": "...",
-            "reason": "..."
-        },
-
-        "negativeOverview": {
-            "title": "...",
-            "description": "...",
-            "reason": "..."
-        },
-
-        "insights": [
-            {
-            "title": "...",
-            "description": "...",
-            "reason": "...",
-            "category": "...",
-            "direction": "..."
-            }
-        ],
-
-        "practicalAdvice": "..."
-        }
-
-        ==================================================
-        GENERAL RULES
-        ==================================================
-
-        Everything must be based ONLY on the supplied input.
-        Never invent planetary influences.
-        Never mention scores, weights or technical values.
-        Do not repeat the same ideas across multiple sections.
-        Every section should contribute something different.
-
-        ==================================================
-        HOW TO WRITE IT
-        ==================================================
-
-        ${VOICE_RULES}
-
-        --------------------------------------------------
-        EXPLANATION FIELDS ("reason")
-        --------------------------------------------------
-
-        ${REASON_RULES}
-
-        ==================================================
-        ASTROLOGY VISIBILITY
-        ==================================================
-
-        The following fields must NEVER mention:
-
-        - astrology
-        - planets
-        - aspects
-        - conjunction
-        - trine
-        - sextile
-        - square
-        - opposition
-        - zodiac signs
-
-        Fields:
-
-        - overview
-        - positiveOverview.description
-        - negativeOverview.description
-        - insights[].description
-        - practicalAdvice
-
-        The following fields SHOULD explain the astrological causes:
-
-        - positiveOverview.reason
-        - negativeOverview.reason
-        - insights[].reason
-
-        At most two planets per field, and say what they do together rather than listing them.
-
-        ==================================================
-        OVERVIEW
-        ==================================================
-
-        Write 2–3 short sentences.
-
-        Maximum 220 characters.
-
-        Never use the reader's own name. Use the other person's freely.
-
-        Write to the reader as "you", and about the other person by name.
-
-        Mention both opportunities and challenges.
-
-        ==================================================
-        POSITIVE OVERVIEW
-        ==================================================
-
-        title
-        2-4 words.
-
-        Examples:
-        Communication
-        Emotional Connection
-        Mutual Support
-        Shared Plans
-        Trust
-        Confidence
-        Patience
-
-        description
-        1-2 sentences.
-        Maximum 180 characters.
-        Describe the strongest positive influence of the day.
-        Focus on real-life situations.
-        No astrology.
-
-        reason
-        1-2 sentences.
-        Maximum 260 characters.
-        Explain why this strength appears today.
-        Mention only the most important planetary influences.
-        Base the explanation ONLY on the supplied positive aspects.
-
-        ==================================================
-        NEGATIVE OVERVIEW
-        ==================================================
-
-        title
-        2-4 words.
-
-        description
-        1-2 sentences.
-        Maximum 180 characters.
-        Describe today's biggest challenge.
-        Explain what could become difficult.
-        No astrology.
-
-        reason
-        1-2 sentences.
-        Maximum 260 characters.
-        Explain which planetary influences create this challenge.
-        Base the explanation ONLY on the supplied negative aspects.
-
-        ========================
-        INSIGHTS
-        ========================
-
-        Generate EXACTLY five insights.
-
-        Each insight represents one relationship area.
-
-        The five categories MUST be:
-
-        - emotional
-        - chemistry
-        - communication
-        - trust
-        - longTerm
-
-        Generate exactly one insight for every category.
-
-        Each insight must contain:
-
-        title
-        description
-        reason
-        category
-        direction
-
-        --------------------------------
-
-        Source data
-
-        The supplied input contains:
-
-        - positiveAspects
-        - negativeAspects
-
-        Each aspect already belongs to one relationship category.
-
-        Use BOTH arrays.
-
-        Do not ignore either positive or negative influences.
-
-        --------------------------------
-
-        category
-
-        Must be exactly one of:
-
-        - emotional
-        - chemistry
-        - communication
-        - trust
-        - longTerm
-
-        Generate exactly one insight for each category.
-
-        --------------------------------
-
-        direction
-
-        Determine the overall direction of this relationship area.
-
-        Choose exactly one:
-
-        - positive
-        - neutral
-        - negative
-
-        The direction should reflect the overall balance of ALL supplied aspects belonging to this category.
-
-        Positive
-
-        Supportive influences clearly dominate.
-
-        Neutral
-
-        Supportive and challenging influences are balanced or mixed.
-
-        Negative
-
-        Challenging influences dominate.
-
-        Do NOT force a positive or negative result.
-
-        Multiple categories may have the same direction.
-
-        --------------------------------
-
-        How to evaluate
-
-        For each relationship category:
-        1. Collect ALL positive aspects belonging to this category.
-        2. Collect ALL negative aspects belonging to this category.
-        3. Calculate:
-
-        positiveScore = sum(score of all positive aspects)
-        negativeScore = sum(abs(score) of all negative aspects)
-
-        4. Compare the totals.
-
-        If positiveScore is significantly higher than negativeScore:
-        direction = positive
-
-        If negativeScore is significantly higher than positiveScore:
-        direction = negative
-
-        If the totals are close:
-        direction = neutral
-
-        The comparison MUST be based primarily on the numerical score values.
-
-        Do NOT decide based on:
-
-        - number of aspects
-        - wording of titles
-        - wording of descriptions
-
-        The score already represents the importance, orb strength and planetary weighting.
-        Always use the score values as the primary signal.
-        Only after determining the direction should you write the description and reason.
-        The written interpretation must be consistent with the calculated direction.
-
-        Example:
-
-        Love
-
-        Positive aspects:
-
-        +12.4
-        +7.3
-
-        Negative aspects:
-
-        -7.1
-        -4.9
-
-        positiveScore = 19.7
-        negativeScore = 12.0
-
-        Result:
-        direction = positive
-
-        Although some differences exist, the supportive influences are stronger overall.
-
-        --------------------------------
-
-        Motivation
-
-        Positive aspects:
-
-        +5.7
-
-        Negative aspects:
-
-        -10.1
-
-        positiveScore = 5.7
-        negativeScore = 10.1
-
-        Result:
-
-        direction = negative
-        The challenging influences outweigh the supportive ones today.
-
-        --------------------------------
-
-        title
-
-        1–3 words.
-        Create a natural user-facing title.
-        The title does NOT need to match the category name.
-
-        Good examples:
-        Emotional Balance
-        Mutual Understanding
-        Different Priorities
-        Natural Chemistry
-        Growing Trust
-        Shared Direction
-        Open Communication
-        Constructive Dialogue
-
-        --------------------------------
-
-        description
-
-        1–2 short sentences.
-        Maximum 100 characters.
-        Explain what this means in everyday life.
-        Do NOT mention astrology.
-
-        If both supportive and challenging influences exist, naturally acknowledge both while remaining consistent with the overall direction.
-
-        --------------------------------
-
-        reason
-        2–3 short sentences.
-        Maximum 180 characters.
-        Explain WHY this relationship area received its direction.
-        Mention the most important planets.
-        Mention at most two planetary aspects.
-        Explain how they interact.
-        Do NOT simply list aspects.
-
-        If both positive and negative influences contributed, explain how they balance each other and why the overall result is positive, neutral or negative.
-
-        ==================================================
-        PRACTICAL ADVICE
-        ==================================================
-
-        2-3 short sentences.
-        Maximum 180 characters.
-        Actionable and specific to these two people today — say what to do, and when.
-        Honest: on a difficult day, say the difficult thing.
-        Naturally combine today's opportunities and today's challenges.
-        No astrology.
-        Avoid generic advice.
-
-        ==================================================
-        RELATIONSHIP CONTEXT
-        ==================================================
-
-        Relationship types:
-
-        - partner
-        - crush
-        - friend
-        - family
-        - coworker
-        - acquaintance
-
-        Adapt every section to the relationship type.
-
-        Examples:
-
-        partner
-
-        - intimacy
-        - affection
-        - quality time
-        - shared decisions
-
-        crush
-
-        - openness
-        - curiosity
-        - patience
-
-        friend
-
-        - support
-        - trust
-        - shared experiences
-
-        family
-
-        - respect
-        - understanding
-        - patience
-
-        coworker
-
-        - communication
-        - cooperation
-        - professionalism
-
-        acquaintance
-
-        - openness
-        - politeness
-        - building rapport
-
-        Never use romantic language unless relationshipType is:
-
-        - partner
-        - crush
-
-        ==================================================
-        WHO IS READING THIS
-        ==================================================
-
-        ${input.personA.name} is reading this about ${input.personB.name}.
-
-        Write to ${input.personA.name} as "you". Never use their name — they know it.
-
-        Use ${input.personB.name}'s name. It is what makes this about these two people
-        rather than about a pair in general, and "the relationship" in every sentence is
-        the register of a generic compatibility report.
-
-        Relationship type: ${input.relationshipType}
-
-        ${input.personB.name} is ${input.personB.gender}. Use gender only for
-        grammatically correct language.
-
-        Treat zodiac signs only as internal context. Never mention them.
-
-        ${readerBlock}
-
-        Respond ONLY in:
-
-        ${language}
-
-        ==================================================
-        INPUT DATA
-        ==================================================
-
-        ${JSON.stringify(
-            {
-                score: input.score,
-                modifier: input.modifier,
-                breakdown: input.breakdown,
-                positiveAspects: input.positiveAspects,
-                negativeAspects: input.negativeAspects,
-            },
-            null,
-            2
-        )}
-        `;
+/* ============================================================
+   PROMPT
+============================================================ */
+
+/**
+ * The aspect's name in English: "Transit Venus trine Anna's natal Venus".
+ *
+ * The model translates this into the reader's language, and it is what a dropped entry
+ * falls back to — so it has to read as a finished label on its own, not as prompt
+ * shorthand. Naming the chart owner is not decoration here: an aspect between the same
+ * planet in both charts is unreadable without it.
+ */
+function contactLabel(contact: CompatibilityContact, personName: string): string {
+    const chart = contact.side === "reader" ? "the reader's natal" : `${personName}'s natal`;
+
+    return `Transit ${contact.transit} ${contact.aspect} ${chart} ${contact.natal}`;
 }
+
+/**
+ * The aspects, as the model sees them.
+ *
+ * The id, the English name and the English caption are all here: the model echoes the
+ * first, translates the second and reads the third for meaning. Orb and exactness let it
+ * tell an aspect 0.2° from exact apart from one about to leave orb — flattened to text
+ * they read identically.
+ */
+function buildContacts(contacts: CompatibilityContact[], personName: string): string {
+    if (contacts.length === 0) {
+        return "Today's sky makes no notable aspect to either chart. Write about the day as the two charts already are, and return an empty array for aspects.";
+    }
+
+    return contacts
+        .map(
+            (contact) =>
+                `- id: ${contact.id} | ${contactLabel(contact, personName)} | "${contact.title}" | ${contact.description} | orb ${contact.orb.toFixed(1)}°, exactness ${contact.exactness}%, ${contact.supportive ? "supportive" : "difficult"}, area: ${contact.category}`
+        )
+        .join("\n");
+}
+
+function buildPrompt(language: string, readerBlock: string, input: CompatibilityInsightInput) {
+    return `
+==================================================
+LANGUAGE AND FORM OF ADDRESS
+==================================================
+
+${language}
+
+This governs every field you return. It is repeated at the end; check it again before you
+answer.
+
+==================================================
+ROLE
+==================================================
+
+You write the daily reading for one relationship in a personal astrology app.
+
+The reader opens a screen about one specific person in their life. They already see the
+score for today and the aspects underneath it. Your job is the part they cannot see: what
+today is actually like between the two of them.
+
+Interpret ONLY the data supplied below. Never invent an influence that is not there.
+
+==================================================
+WHO IS READING THIS
+==================================================
+
+${input.personA.name} is reading this about ${input.personB.name}.
+
+Write to ${input.personA.name} as "you". Never use their name — they know it.
+
+Use ${input.personB.name}'s name. It is what makes this about these two people rather than
+about a pair in general, and "the relationship" in every sentence is the register of a
+generic compatibility report.
+
+Relationship type: ${input.relationshipType}
+
+${input.personB.name} is ${input.personB.gender}. Use gender only for grammatically
+correct language.
+
+Treat zodiac signs only as internal context. Never mention them.
+
+==================================================
+TODAY BETWEEN THEM
+==================================================
+
+Score today: ${input.score}/100
+
+How far today moves them from their usual: ${input.modifier.toFixed(1)}
+
+Supportive weight today: ${input.positiveTotal.toFixed(1)}
+Difficult weight today: ${Math.abs(input.negativeTotal).toFixed(1)}
+
+Where today lands, by area:
+
+- emotional: ${input.breakdown.emotional.toFixed(1)}
+- love: ${input.breakdown.love.toFixed(1)}
+- communication: ${input.breakdown.communication.toFixed(1)}
+- motivation: ${input.breakdown.motivation.toFixed(1)}
+
+These numbers decide what you write. Never mention them, and never let the text disagree
+with them — a day whose difficult weight is twice its supportive one is not a warm day
+with a small caveat.
+
+==================================================
+WHAT TODAY IS DOING TO EACH CHART
+==================================================
+
+Today's sky is the same for both of them. What differs is the chart it lands on, and that
+is what makes this about these two people.
+
+${buildContacts(input.contacts, input.personB.name)}
+
+An aspect to the reader's chart says what THEY bring into today. An aspect to
+${input.personB.name}'s chart says what comes at them from ${input.personB.name}'s side —
+their mood, their pace, what they have patience for. Say which of the two it is when it
+matters; it is usually the most useful thing on the screen.
+
+Use them as the mechanism behind what you describe. Never name them as jargon — the reader
+should recognise the day, not the aspect.
+
+${readerBlock}
+
+==================================================
+OUTPUT
+==================================================
+
+Return ONLY valid JSON.
+
+{
+    "overview": {
+        "title": "string",
+        "description": "string"
+    },
+    "deepInsight": [
+        "string",
+        "string",
+        "string"
+    ],
+    "opportunity": {
+        "description": "string",
+        "examples": ["string", "string", "string", "string"]
+    },
+    "watchOut": {
+        "description": "string",
+        "examples": ["string", "string", "string", "string"]
+    },
+    "practicalAdvice": "string",
+    "aspects": [
+        {
+            "id": "string",
+            "title": "string",
+            "description": "string"
+        }
+    ]
+}
+
+Field requirements:
+
+- overview.title:
+  Short, memorable headline for today between them (max 30-40 characters).
+
+- overview.description:
+  One concise summary of what today is like between them (max 180 characters). Mention
+  both what is easy and what is not.
+
+- deepInsight:
+  The long read: what today is like between the two of them, where it will show up, and
+  what to do differently. It has room, so use it for more situations and sharper advice —
+  never for longer sentences or a bigger vocabulary.
+
+  Move somewhere across it. Each paragraph carries the reader forward; one that restates
+  the last in different words is the failure to watch for.
+
+  ONE PARAGRAPH PER ARRAY ENTRY, 3-5 entries. Never put a line break inside an entry and
+  never return the whole reading as a single entry - the array IS the paragraph structure,
+  and one long entry renders as one wall of text.
+
+- opportunity.description:
+  What is genuinely open between them today, and what to do with it (max 150 characters).
+
+- opportunity.examples:
+  Array of exactly 4 short words or phrases - things worth doing together today.
+  Name ACTIVITIES AND SITUATIONS, not feelings or qualities: "Making plans" is right,
+  "Emotional depth" is not.
+  Examples:
+  ["Making plans", "A long talk", "Saying thanks", "Cooking together"]
+
+- watchOut.description:
+  What is most likely to go wrong between them today, and how (max 150 characters).
+
+- watchOut.examples:
+  Array of exactly 4 short words or phrases - things worth postponing or handling
+  carefully today. Not vague cautions that would be true on any day.
+  Examples:
+  ["Money talk", "Old arguments", "Surprise plans", "Asking for a decision"]
+
+- practicalAdvice:
+  2-3 short sentences, max 180 characters. Actionable and specific to these two people
+  today — say what to do, and when. Honest: on a difficult day, say the difficult thing.
+  Never generic advice.
+
+- aspects:
+  Exactly one object for every aspect listed under WHAT TODAY IS DOING TO EACH CHART, in
+  the same order, copying each "id" character for character. Never invent one and never
+  drop one. If no aspects are listed there, return an empty array.
+
+- aspects[].title:
+  The aspect's NAME, translated: the second field of its line, the one that reads
+  "Transit <planet> <aspect> <whose> natal <planet>".
+
+  Name both planets and the angle between them, in the reader's language, using the
+  ordinary name of each body as the naming rule above requires. This is the ONE field
+  that says the
+  geometry out loud — everything else in this answer hides it. Never replace it with a
+  mood, a theme or a poetic caption, and never translate the caption in quotes instead:
+  that caption is what the aspect MEANS, and its place is the description.
+
+  Say whose chart each planet belongs to. Both planets are often the same one, and
+  without it the label says nothing.
+
+  Keep it to the name. No verbs about the reader's day, no orb, no percentage, no
+  interpretation.
+
+  Czech, for shape only — write the equivalent in the reader's language:
+  "Tranzitní Venuše v trigonu k Venuši Anny", "Tranzitní Mars v kvadratuře k tvému Měsíci".
+
+- aspects[].description:
+  90 to 130 characters, in two parts.
+
+  First, what this aspect is about between them, as a compressed phrase rather than a full
+  sentence: "warmth that comes easily today", "his patience is shorter than usual". An
+  abstract noun is allowed here — that is the register of a label.
+
+  Then a REAL SENTENCE about today: a verb, and something the reader could actually do or
+  notice. Not a slogan. "Be patient", "stay open" and "communicate honestly" are not
+  recommendations, they are decoration, and they are what this field degrades into when
+  nothing stops it.
+
+  Do not give every aspect the same shape. If several in a row read as "abstract noun,
+  semicolon, imperative", rewrite them. Never repeat the title, and never say what another
+  aspect's description already said.
+
+  Follow the explanation rules below: name what the planets do, never the angle between
+  them. The angle belongs in the title and nowhere else.
+
+Do not return markdown. Do not wrap the JSON inside code fences. Do not explain anything.
+Return only the JSON object.
+
+==================================================
+ONE THEME, THEN ANGLES ON IT
+==================================================
+
+Before you write anything, decide what today is ABOUT for these two — one sentence, taken
+from the strongest of the aspects above. Something like "you want to settle something and
+${input.personB.name} is not in the mood to be pinned down."
+
+That is the spine. Everything else is an angle on it: where it shows up, what gets in its
+way, what to do about it. A paragraph that introduces a new subject instead of turning
+that one over is the failure this rule exists for — cut it and write the missing angle
+instead.
+
+"overview.description" states the theme plainly. "deepInsight" develops it. They must be
+the same idea, not two different readings of the day.
+
+Open with the theme, in words the reader recognises from their own life. Then the friction:
+what pushes back against it, and where they will actually notice it — in a message, in an
+evening, in a conversation they keep putting off. Then one more angle, still on the same
+theme. Close by turning it into a choice, not a summary and not encouragement.
+
+Do not repeat ideas across sections. The overview, the long read, the opportunity, the
+watch-out and the advice each have to carry something the others do not.
+
+==================================================
+HOW TO WRITE IT
+==================================================
+
+${VOICE_RULES}
+
+--------------------------------------------------
+THE EXPLANATION IN "aspects[].description"
+--------------------------------------------------
+
+${REASON_RULES}
+
+These rules govern "aspects[].description" and every other field. "aspects[].title" is the
+single exception and is bound by its own rule above: it is the aspect's name, so it names
+the angle.
+
+==================================================
+ASTROLOGY VISIBILITY
+==================================================
+
+These fields must NEVER mention astrology, planets, aspects, conjunctions, trines,
+sextiles, squares, oppositions or zodiac signs:
+
+- overview.title
+- overview.description
+- deepInsight
+- opportunity.description
+- opportunity.examples
+- watchOut.description
+- watchOut.examples
+- practicalAdvice
+
+Two fields are exempt. "aspects[].title" is the aspect's name and must name the planets
+and the angle. "aspects[].description" explains the astrological cause, under the rules
+above: at most two planets, and say what they do together rather than listing them.
+
+==================================================
+RELATIONSHIP CONTEXT
+==================================================
+
+Relationship types:
+
+- partner
+- crush
+- friend
+- family
+- coworker
+- acquaintance
+
+Adapt every section to the relationship type. What is at stake differs:
+
+partner - intimacy, affection, quality time, shared decisions
+crush - openness, curiosity, patience
+friend - support, trust, shared experiences
+family - respect, understanding, patience
+coworker - communication, cooperation, professionalism
+acquaintance - openness, politeness, building rapport
+
+Never use romantic language unless the relationship type is "partner" or "crush".
+
+Respond ONLY in:
+
+${language}
+`;
+}
+
+/* ============================================================
+   GENERATE
+============================================================ */
 
 const MODEL = "gemini-2.5-flash";
 
@@ -593,11 +465,11 @@ const PRICE_PER_MILLION = { input: 0.3, output: 2.5 };
  * Never throws on a bad answer: the caller logs every call, successful or not, so a
  * parse failure has to come back with its metrics attached.
  */
-export async function generateDailyOverview(
+export async function generateCompatibilityInsight(
     languageIso: string,
-    input: DailyCompatibilityAiInput
+    input: CompatibilityInsightInput
 ): Promise<{
-    content: DailyOverviewResponse | null;
+    content: CompatibilityInsightContent | null;
     usage: {
         requestId: string;
         provider: string;
@@ -637,7 +509,7 @@ export async function generateDailyOverview(
             thinkingConfig: { thinkingBudget: 0 },
             temperature: 0.5,
             responseMimeType: "application/json",
-            responseJsonSchema: toResponseJsonSchema(dailyOverviewSchema),
+            responseJsonSchema: toResponseJsonSchema(answerSchema),
         },
     });
 
@@ -669,7 +541,7 @@ export async function generateDailyOverview(
     };
 
     const raw = parseLLMJson<unknown>(text);
-    const parsed = raw === null ? null : dailyOverviewSchema.safeParse(raw);
+    const parsed = raw === null ? null : answerSchema.safeParse(raw);
 
     if (!parsed?.success) {
         /**
@@ -694,5 +566,50 @@ export async function generateDailyOverview(
         };
     }
 
-    return { content: parsed.data, usage };
+    const result = parsed.data;
+
+    return {
+        usage,
+        content: {
+            overview: result.overview,
+            // Trimmed and emptied out here so no screen has to defend against a blank
+            // paragraph the model padded the array with.
+            deepInsight: result.deepInsight.map((paragraph) => paragraph.trim()).filter(Boolean),
+            /**
+             * Trimmed to four each because the schema cannot bound array length for the
+             * decoder — a model that returns six chips would otherwise overflow the row
+             * of them on the screen.
+             */
+            opportunity: {
+                description: result.opportunity.description,
+                examples: result.opportunity.examples.slice(0, 4),
+            },
+            watchOut: {
+                description: result.watchOut.description,
+                examples: result.watchOut.examples.slice(0, 4),
+            },
+            practicalAdvice: result.practicalAdvice,
+            /**
+             * Driven by the engine's list, not the model's: an aspect the model dropped,
+             * duplicated or renamed still gets an entry, falling back to the English
+             * caption rather than disappearing from the screen.
+             */
+            aspects: Object.fromEntries(
+                input.contacts.map((contact) => {
+                    const written = result.aspects.find((entry) => entry.id === contact.id);
+
+                    return [
+                        contact.id,
+                        {
+                            id: contact.id,
+                            // The English name, not the English caption: a dropped entry
+                            // has to fall back to the same kind of thing the field holds.
+                            title: written?.title ?? contactLabel(contact, input.personB.name),
+                            description: written?.description ?? contact.description,
+                        },
+                    ];
+                })
+            ),
+        },
+    };
 }

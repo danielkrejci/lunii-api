@@ -10,10 +10,13 @@ import { z } from "zod";
 import { aiGenerations, dailyInsights, planetInsights, profile as profileTable } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { PLANETS } from "../../modules/astro";
+import { creditKeys } from "../../modules/credits/keys";
+import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../modules/credits/service";
 import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyScore";
 import { getOrCreateTransits, scoreProfileForDate } from "../../modules/dailyScore/service";
-import { DailyTeaser, generatePlanetInsights } from "../../modules/insights/planets";
-import { errorSchema } from "../../utils/zodResponse";
+import { GenerationStatus } from "../../modules/insights";
+import { DailyTeaser, generatePlanetInsights, PlanetInsightContent } from "../../modules/insights/planets";
+import { accessSchema, errorSchema, insufficientCreditsSchema } from "../../utils/zodResponse";
 
 dayjs.extend(utc);
 
@@ -35,7 +38,7 @@ const responseSchema = z.object({
             z.object({
                 name: z.enum(PLANETS),
                 score: z.number(),
-                contacts: z.array(
+                aspects: z.array(
                     z.object({
                         id: z.string(),
                         transit: z.string(),
@@ -48,7 +51,13 @@ const responseSchema = z.object({
                 ),
             })
         ),
+        access: accessSchema,
         content: z.discriminatedUnion("status", [
+            /**
+             * Nobody has paid for this day yet. Everything above stays on screen —
+             * only the written half costs anything.
+             */
+            z.object({ status: z.literal("locked"), data: z.null(), error: z.null() }),
             z.object({ status: z.literal("pending"), data: z.null(), error: z.null() }),
             z.object({
                 status: z.literal("failed"),
@@ -68,7 +77,7 @@ const responseSchema = z.object({
                              * written for one day's aspects, and a contact that has moved
                              * on must simply have no wording.
                              */
-                            contacts: z.record(
+                            aspects: z.record(
                                 z.string(),
                                 z.object({
                                     id: z.string(),
@@ -229,10 +238,24 @@ async function generate(
             }
         }
 
-        await fastify.db
+        const failed = await fastify.db
             .update(planetInsights)
             .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
-            .where(owned);
+            .where(owned)
+            .returning({ date: planetInsights.date });
+
+        /**
+         * Give the credits back, and revoke the unlock with them. Guarded on the update
+         * having matched, so only the run that owned this row refunds; `refundUnlock`
+         * deletes and returns exactly once, so the sweeper racing it gives back nothing.
+         */
+        if (failed.length > 0) {
+            await refundUnlock(fastify.db, {
+                userId,
+                feature: "planetInsight",
+                resourceKey: creditKeys.planetInsight(date),
+            }).catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Failed to refund credits"));
+        }
     })().catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Planet generation crashed"));
 }
 
@@ -244,7 +267,7 @@ async function generate(
  */
 async function buildResponse(
     db: FastifyInstance["db"],
-    input: { userId: string; profile: typeof profileTable.$inferSelect; date: string }
+    input: { userId: string; profile: typeof profileTable.$inferSelect; date: string; access: AccessState }
 ): Promise<ResponseData> {
     const { date, userId } = input;
 
@@ -264,21 +287,45 @@ async function buildResponse(
         planets: summarizePlanetInfluence(score.impacts).map((weight) => ({
             name: weight.name,
             score: weight.score,
-            contacts: weight.contacts.map(toContactSummary),
+            aspects: weight.contacts.map(toContactSummary),
         })),
-        // `absent` is reported as pending: the read path claims the generation before it
-        // answers, so the client never has to know that state exists.
-        content:
-            stored?.status === "ready" && stored.content
-                ? { status: "ready" as const, data: stored.content, error: null }
-                : stored?.status === "failed"
-                  ? {
-                        status: "failed" as const,
-                        data: null,
-                        error: { code: "generation_failed", message: "Generating today's planets failed." },
-                    }
-                  : { status: "pending" as const, data: null, error: null },
+        access: input.access,
+        content: describeContent(stored, input.access),
     };
+}
+
+/**
+ * How the written half is reported.
+ *
+ * One row holds every planet for a day, so one unlock opens the whole panel rather than
+ * a planet at a time. Order matters: `locked` is checked before `failed`, because a
+ * failed generation was refunded and its unlock revoked, and reporting the stale failure
+ * would offer a retry that silently costs money.
+ *
+ * `absent` is reported as pending — the read claims the generation for anyone entitled
+ * to it, so the client never has to know that state exists.
+ */
+function describeContent(
+    stored: { content: PlanetInsightContent | null; status: GenerationStatus } | undefined,
+    access: AccessState
+): ResponseData["content"] {
+    if (stored?.status === "ready" && stored.content) {
+        return { status: "ready", data: stored.content, error: null };
+    }
+
+    if (!access.unlocked) {
+        return { status: "locked", data: null, error: null };
+    }
+
+    if (stored?.status === "failed") {
+        return {
+            status: "failed",
+            data: null,
+            error: { code: "generation_failed", message: "Generating today's planets failed." },
+        };
+    }
+
+    return { status: "pending", data: null, error: null };
 }
 
 export default (async (fastify) => {
@@ -340,10 +387,17 @@ export default (async (fastify) => {
             try {
                 const date = dayjs.utc(request.query.date).format("YYYY-MM-DD");
 
+                const access = await checkAccess(fastify.db, {
+                    userId: session.user.id,
+                    feature: "planetInsight",
+                    resourceKey: creditKeys.planetInsight(date),
+                });
+
                 const data = await buildResponse(fastify.db, {
                     userId: session.user.id,
                     profile: session.profile,
                     date,
+                    access,
                 });
 
                 /**
@@ -353,7 +407,7 @@ export default (async (fastify) => {
                  * fires while the day has no content and no live run, and a failed one is
                  * left for the explicit retry.
                  */
-                if (!data.content.data) {
+                if (access.unlocked && !data.content.data) {
                     await generate(fastify, {
                         userId: session.user.id,
                         profile: session.profile,
@@ -396,7 +450,13 @@ export default (async (fastify) => {
                 body: z.object({
                     date: z.string().refine((val) => dayjs.utc(val).isValid(), { message: "Invalid date format" }),
                 }),
-                response: { 202: responseSchema, 401: errorSchema, 409: errorSchema, 500: errorSchema },
+                response: {
+                    202: responseSchema,
+                    401: errorSchema,
+                    402: insufficientCreditsSchema,
+                    409: errorSchema,
+                    500: errorSchema,
+                },
             },
         },
         async (request, reply) => {
@@ -418,8 +478,37 @@ export default (async (fastify) => {
                 const date = dayjs.utc(request.body.date).format("YYYY-MM-DD");
 
                 // The client may retry a day it has never read, and the claim below can
-                // only update a row that is already there.
-                await buildResponse(fastify.db, { userId: session.user.id, profile: session.profile, date });
+                // only update a row that is already there. Just the row: this used to
+                // build a whole response and throw it away, which cost an ephemeris read
+                // and a full scoring pass for one insert.
+                await fastify.db.insert(planetInsights).values({ userId: session.user.id, date }).onConflictDoNothing();
+
+                /**
+                 * The purchase. This endpoint is both the unlock and the retry, and the
+                 * unlock row is what tells them apart: a reader who already owns the day
+                 * is charged nothing, so retrying something they paid for is free.
+                 */
+                const spend = await spendCredits(fastify.db, {
+                    userId: session.user.id,
+                    feature: "planetInsight",
+                    resourceKey: creditKeys.planetInsight(date),
+                });
+
+                if (!spend.ok) {
+                    return reply.status(402).send({
+                        error: {
+                            code: "insufficient_credits" as const,
+                            message: "Not enough credits to unlock this reading.",
+                            silent: true as const,
+                            details: {
+                                feature: "planetInsight",
+                                cost: spend.cost,
+                                balance: spend.balance,
+                                nextCreditAt: spend.nextCreditAt?.toISOString() ?? null,
+                            },
+                        },
+                    });
+                }
 
                 /**
                  * Retry after a failure — the one path allowed to claim a `failed` day.
@@ -437,6 +526,11 @@ export default (async (fastify) => {
                     userId: session.user.id,
                     profile: session.profile,
                     date,
+                    access: await checkAccess(fastify.db, {
+                        userId: session.user.id,
+                        feature: "planetInsight",
+                        resourceKey: creditKeys.planetInsight(date),
+                    }),
                 });
 
                 return reply.status(202).send({ data });

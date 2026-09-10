@@ -9,26 +9,16 @@ import { z } from "zod";
 import { aiGenerations, compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { NatalChart } from "../../../modules/astro";
-import { generateDailyOverview } from "../../../modules/compatibilityPeople/ai";
+import { generateCompatibilityInsight } from "../../../modules/compatibilityPeople/ai";
 import { calculateDailyCompatibility } from "../../../modules/compatibilityPeople/aspects";
+import { CONTACT_SIDES, dailyContacts } from "../../../modules/compatibilityPeople/contacts";
 import { normalizeScore, OVERALL_NORMALIZER } from "../../../modules/compatibilityPeople/normalizer";
-import { INSIGHT_DIRECTIONS, RELATIONSHIP_CATEGORIES } from "../../../modules/compatibilityPeople/types";
+import { creditKeys } from "../../../modules/credits/keys";
+import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../../modules/credits/service";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { serializeDrizzleData } from "../../../utils/drizzleUtils";
 import { Genders, Relationships, SINGS_MAP } from "../../../utils/natalUtils";
-
-const errorSchema = z.object({
-    error: z.object({
-        code: z.string(),
-        message: z.string(),
-    }),
-});
-
-const overviewBlock = z.object({
-    title: z.string(),
-    description: z.string(),
-    reason: z.string(),
-});
+import { accessSchema, errorSchema, insufficientCreditsSchema } from "../../../utils/zodResponse";
 
 /**
  * Shared by the read and the generate route so a generate response can go straight
@@ -57,7 +47,38 @@ const responseSchema = z.object({
         compatibility: z.any(),
         score: z.number(),
         date: z.string(),
+        /**
+         * The aspects today's sky makes to the two natal charts, most exact first — the
+         * same shape the daily horoscope and the Moon screen use, so the app renders all
+         * three with one component. An empty array is a real answer: some days the sky
+         * touches neither chart.
+         */
+        aspects: z.array(
+            z.object({
+                /** "reader_moon_square_venus" — the join key for the written half. */
+                id: z.string(),
+                /** Whose natal chart today's transit lands on. */
+                side: z.enum(CONTACT_SIDES),
+                transit: z.string(),
+                natal: z.string(),
+                aspect: z.string(),
+                /** Degrees from exact, one decimal. */
+                orb: z.number(),
+                /** 0–100. How precisely the aspect lands today. */
+                exactness: z.number(),
+                /** Supportive or difficult, from the signed score. */
+                supportive: z.boolean(),
+                category: z.string(),
+            })
+        ),
+        access: accessSchema,
         content: z.discriminatedUnion("status", [
+            /**
+             * Nobody has paid for this reading yet. The score, the aspects and the
+             * chart stay on screen — only the written half costs anything, and here
+             * it doubles as the argument for unlocking it.
+             */
+            z.object({ status: z.literal("locked"), data: z.null(), error: z.null() }),
             z.object({ status: z.literal("pending"), data: z.null(), error: z.null() }),
             z.object({
                 status: z.literal("failed"),
@@ -67,19 +88,17 @@ const responseSchema = z.object({
             z.object({
                 status: z.literal("ready"),
                 data: z.object({
-                    overview: z.string(),
-                    positiveOverview: overviewBlock,
-                    negativeOverview: overviewBlock,
-                    insights: z.array(
-                        z.object({
-                            title: z.string(),
-                            description: z.string(),
-                            reason: z.string(),
-                            category: z.enum(RELATIONSHIP_CATEGORIES),
-                            direction: z.enum(INSIGHT_DIRECTIONS),
-                        })
-                    ),
+                    overview: z.object({ title: z.string(), description: z.string() }),
+                    /** Paragraphs. Split on the server so no screen has to parse "\n". */
+                    deepInsight: z.array(z.string()),
+                    opportunity: z.object({ description: z.string(), examples: z.array(z.string()) }),
+                    watchOut: z.object({ description: z.string(), examples: z.array(z.string()) }),
                     practicalAdvice: z.string(),
+                    /** One caption per aspect above, keyed by the same id. */
+                    aspects: z.record(
+                        z.string(),
+                        z.object({ id: z.string(), title: z.string(), description: z.string() })
+                    ),
                 }),
                 error: z.null(),
             }),
@@ -176,8 +195,10 @@ async function loadPersonWithScore(
     return stored && stored.score !== null && stored.compatibility !== null ? (stored as Person) : null;
 }
 
-function toResponse(person: Person, date: string) {
-    return serializeDrizzleData({
+function toResponse(person: Person, date: string, access: AccessState) {
+    // Only the deterministic half goes through the serializer: it turns numeric-looking
+    // strings into numbers, which is right for numeric columns and wrong for free text.
+    const deterministic = serializeDrizzleData({
         id: person.id,
         name: person.name,
         gender: person.gender,
@@ -194,17 +215,40 @@ function toResponse(person: Person, date: string) {
         compatibility: person.compatibility,
         score: person.score,
         date,
-        content:
-            person.status === "ready" && person.content
-                ? { status: "ready" as const, data: person.content, error: null }
-                : person.status === "failed"
-                  ? {
-                        status: "failed" as const,
-                        data: null,
-                        error: { code: "generation_failed", message: "Writing this reading failed." },
-                    }
-                  : { status: "pending" as const, data: null, error: null },
+        // Derived from the stored blob the score was built from, so the aspects on the
+        // screen are always the ones the text was written from.
+        aspects: dailyContacts(person.compatibility),
     });
+
+    return { ...deterministic, access, content: describeContent(person, access) };
+}
+
+/**
+ * How the written half is reported.
+ *
+ * A reading already written is `ready` whatever the wallet says. After that an unowned
+ * one is `locked`, checked before `failed` because a generation that failed was
+ * refunded and its unlock revoked — reporting the stale failure would offer a retry
+ * that silently costs money.
+ */
+function describeContent(person: Person, access: AccessState) {
+    if (person.status === "ready" && person.content) {
+        return { status: "ready" as const, data: person.content, error: null };
+    }
+
+    if (!access.unlocked) {
+        return { status: "locked" as const, data: null, error: null };
+    }
+
+    if (person.status === "failed") {
+        return {
+            status: "failed" as const,
+            data: null,
+            error: { code: "generation_failed", message: "Writing this reading failed." },
+        };
+    }
+
+    return { status: "pending" as const, data: null, error: null };
 }
 
 /**
@@ -262,7 +306,7 @@ async function generate(
         // One retry: most failures here are a timeout or a rate limit rather than
         // anything a second attempt would hit again.
         for (let attempt = 1; attempt <= 2; attempt++) {
-            const { content, usage } = await generateDailyOverview(profile.language, {
+            const { content, usage } = await generateCompatibilityInsight(profile.language, {
                 score: person.score,
                 modifier: person.compatibility.modifier,
 
@@ -271,22 +315,9 @@ async function generate(
 
                 breakdown: person.compatibility.overallBreakdown,
 
-                positiveAspects: person.compatibility.positiveAspects.map(({ rule, score }) => ({
-                    title: rule.title,
-                    description: rule.description,
-                    category: rule.category,
-                    planetA: rule.planetA,
-                    planetB: rule.planetB,
-                    score,
-                })),
-                negativeAspects: person.compatibility.negativeAspects.map(({ rule, score }) => ({
-                    title: rule.title,
-                    description: rule.description,
-                    category: rule.category,
-                    planetA: rule.planetA,
-                    planetB: rule.planetB,
-                    score,
-                })),
+                // The same list the response carries, so the captions the model writes
+                // land on exactly the aspects shown underneath the text.
+                contacts: dailyContacts(person.compatibility),
 
                 relationshipType: person.relationship,
 
@@ -338,10 +369,27 @@ async function generate(
             }
         }
 
-        await fastify.db
+        const failed = await fastify.db
             .update(compatibilityPeopleScores)
             .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
-            .where(owned);
+            .where(owned)
+            .returning({ date: compatibilityPeopleScores.date });
+
+        /**
+         * Give the credits back, and revoke the unlock with them. Guarded on the update
+         * having matched, so only the run that owned this row refunds; `refundUnlock`
+         * deletes and returns exactly once, so the sweeper racing it gives back nothing.
+         */
+        if (failed.length > 0) {
+            await refundUnlock(fastify.db, {
+                // The reader who paid, not the person the reading is about.
+                userId: profile.userId,
+                feature: "compatibilityDetail",
+                resourceKey: creditKeys.compatibilityDetail(person.id, date),
+            }).catch((error: unknown) =>
+                fastify.log.error({ err: error, personId: person.id, date }, "Failed to refund credits")
+            );
+        }
     })().catch((error: unknown) => fastify.log.error({ err: error, personId: person.id, date }, "Generation crashed"));
 }
 
@@ -432,14 +480,22 @@ export default (async (fastify) => {
                     return reply.status(404).send(notFound);
                 }
 
+                const access = await checkAccess(fastify.db, {
+                    userId: session.user.id,
+                    feature: "compatibilityDetail",
+                    resourceKey: creditKeys.compatibilityDetail(person.id, date),
+                });
+
                 /**
                  * The one side effect of this route: opening a person's detail starts
-                 * their reading. The list never comes here, so nobody pays for a person
-                 * whose detail is never opened. Repeated reads change nothing — the claim
-                 * only fires while the day has no content and no live run, and a failed
-                 * one is left for the explicit retry.
+                 * their reading — but only once it has been paid for. The read itself
+                 * stays free and must: the client polls it while a reading is pending,
+                 * and a charging GET would bill every poll.
+                 *
+                 * Repeated reads after that change nothing — the claim only fires while
+                 * the day has no content and no live run.
                  */
-                if (!person.content) {
+                if (access.unlocked && !person.content) {
                     await generate(fastify, {
                         person,
                         profile: session.profile,
@@ -448,7 +504,7 @@ export default (async (fastify) => {
                     });
                 }
 
-                return reply.status(200).send({ data: toResponse(person, date) });
+                return reply.status(200).send({ data: toResponse(person, date, access) });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 
@@ -485,6 +541,7 @@ export default (async (fastify) => {
                 }),
                 response: {
                     202: responseSchema,
+                    402: insufficientCreditsSchema,
                     401: errorSchema,
                     404: errorSchema,
                     409: errorSchema,
@@ -527,6 +584,34 @@ export default (async (fastify) => {
                  * Claimed before the response is built, so the client is told `pending`
                  * and starts polling instead of reading back the failure it just retried.
                  */
+                /**
+                 * The purchase. Charged after the person is loaded, so a reading for
+                 * somebody else's person — or one that does not exist — can never take
+                 * credits. Both the unlock and the retry come through here, and the
+                 * unlock row tells them apart: owning it already costs nothing.
+                 */
+                const spend = await spendCredits(fastify.db, {
+                    userId: session.user.id,
+                    feature: "compatibilityDetail",
+                    resourceKey: creditKeys.compatibilityDetail(person.id, date),
+                });
+
+                if (!spend.ok) {
+                    return reply.status(402).send({
+                        error: {
+                            code: "insufficient_credits" as const,
+                            message: "Not enough credits to unlock this reading.",
+                            silent: true as const,
+                            details: {
+                                feature: "compatibilityDetail",
+                                cost: spend.cost,
+                                balance: spend.balance,
+                                nextCreditAt: spend.nextCreditAt?.toISOString() ?? null,
+                            },
+                        },
+                    });
+                }
+
                 await generate(fastify, { person, profile: session.profile, date, allowFailed: true });
 
                 const claimed = await loadPersonWithScore(fastify.db, {
@@ -537,7 +622,17 @@ export default (async (fastify) => {
                     timezone: session.profile.timezone,
                 });
 
-                return reply.status(202).send({ data: toResponse(claimed ?? person, date) });
+                return reply.status(202).send({
+                    data: toResponse(
+                        claimed ?? person,
+                        date,
+                        await checkAccess(fastify.db, {
+                            userId: session.user.id,
+                            feature: "compatibilityDetail",
+                            resourceKey: creditKeys.compatibilityDetail(person.id, date),
+                        })
+                    ),
+                });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 

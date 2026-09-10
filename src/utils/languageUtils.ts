@@ -298,16 +298,31 @@ const GENDER_RULE: Record<Gender, string> = {
  * without a space. A reader forgives a dull horoscope; a misspelt one reads as broken
  * software.
  */
+/**
+ * What the model is being asked to produce.
+ *
+ * Every generator here returns a JSON object against a response schema; the chat
+ * returns prose to a person. The distinction exists because the proofreading
+ * instruction below names what is being checked, and telling a conversation to re-read
+ * "the JSON" is both meaningless and an invitation to answer with some.
+ */
+export type PromptOutputShape = "json" | "prose";
+
+const PROOFREAD: Record<PromptOutputShape, string> = {
+    json: "Before you return the JSON, read every field you wrote once more and fix any spelling,\nagreement, or spacing mistake.",
+    prose: "Before you send your answer, read it back once and fix any spelling, agreement, or\nspacing mistake.",
+};
+
 const correctnessRule = (
-    language: Language
+    language: Language,
+    shape: PromptOutputShape
 ) => `Write correct, idiomatic ${language.name}. This is not a style preference — it is a
 requirement, and it matters more than anything else in these instructions.
 
 Every accent and diacritic must be present and correct. Conditional and reflexive forms
 must be built properly. Every sentence ends with punctuation followed by a single space.
 
-Before you return the JSON, read every field you wrote once more and fix any spelling,
-agreement, or spacing mistake. Do not rely on it having come out right the first time.`;
+${PROOFREAD[shape]} Do not rely on it having come out right the first time.`;
 
 export function getLanguageByIso(iso: string): Language | undefined {
     return languagesData.find((l) => l.iso === iso);
@@ -319,12 +334,16 @@ export function getLanguageByIso(iso: string): Language | undefined {
  * them in one place is what stops the four prompts from drifting into three different
  * registers for the same reader.
  */
-export function buildPromptLanguageRule(language: Language, gender: Gender) {
+/**
+ * `shape` defaults to `json` because that is what every generator that predates the chat
+ * returns — adding the parameter changed no existing call site.
+ */
+export function buildPromptLanguageRule(language: Language, gender: Gender, shape: PromptOutputShape = "json") {
     return `${language.name} (${language.appleLocale}, ${language.iso})
 
 ${ADDRESS_FORM_RULE[language.addressForm]}
 
 ${GENDER_RULE[gender]}
 
-${correctnessRule(language)}`;
+${correctnessRule(language, shape)}`;
 }

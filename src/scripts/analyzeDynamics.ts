@@ -1,7 +1,7 @@
 /**
  * How much the score actually moves, and how much the four areas differ.
  *
- * The population distribution (p10 38 / p90 74) mixes two things: how much one
+ * The population distribution (p10 25 / p90 85) mixes two things: how much one
  * user's score moves over time, and how much users differ from each other. A user
  * only ever sees the first. This script separates them.
  *
@@ -132,7 +132,7 @@ for (const key of KEYS) {
     );
 }
 
-console.log("  the calibrated p10-p90 of 38-74 is the TOTAL spread; a user only ever sees the within part");
+console.log("  the calibrated p10-p90 of 25-85 is the TOTAL spread; a user only ever sees the within part");
 
 /* ============================================================
    3. HOW ALIKE THE FOUR AREAS ARE

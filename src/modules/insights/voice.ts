@@ -1,9 +1,10 @@
 /**
  * How every generated text is written.
  *
- * One definition shared by the horoscope, the Moon screen, the compatibility overview and
- * the onboarding profile — the four of them are the same voice talking to the same person,
- * and four separately worded style sections drift apart within a release or two.
+ * One definition shared by the horoscope, the planet panel, the Moon screen, the
+ * compatibility reading and the onboarding profile — all five are the same voice talking
+ * to the same person, and five separately worded style sections drift apart within a
+ * release or two.
  *
  * The rules are worded against a specific failure, not toward an ideal. Left to itself the
  * model writes competent essay prose: long sentences, abstract nouns, and a closing
@@ -37,6 +38,22 @@ Banned outright, in any language, because they are how this text goes wrong:
   "lean into"
 - the essayist's closing move: "today teaches you that...", "true progress comes not
   from... but from...", "the real question is..."
+
+NAME THE BODIES BY THEIR ORDINARY NAME
+
+When you name a planet, the Sun or the Moon, use the plain word that language uses for the
+object in the sky — the one in a school atlas or a weather forecast. Never the poetic or
+literary synonym, and never the Latin one where the language has a word of its own.
+
+Astrological writing is full of the elevated variants, and the pull is to reach for one to
+sound the part. They read as costume, and a good half of readers do not connect them to
+the body at all.
+
+  Czech: Měsíc, never Luna. Slunce, never Sol.
+  English: the Moon, never Luna or Selene. The Sun, never Sol.
+
+Every language has its own version of that pair. Apply the rule, not the two examples: the
+question is always whether that is the word the language uses for the object itself.
 
 CONCRETE, NOT ABSTRACT
 

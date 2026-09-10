@@ -6,14 +6,18 @@ import { AsyncTask, CronJob } from "toad-scheduler";
 
 import { calculateDailyScore } from ".";
 import {
+    chatMessages,
     compatibilityPeopleScores,
     dailyInsights,
     moonInsights,
+    planetInsights,
     profile as profileTable,
     transit,
 } from "../../db/schema";
 import { TransitAspects } from "../../utils/natalUtils";
 import { NatalChart, TransitChart } from "../astro";
+import { creditKeys } from "../credits/keys";
+import { refundUnlock } from "../credits/service";
 import { computeTransits, utcOffsetForDate } from "../transits";
 import { DailyScoreResult } from "./types";
 
@@ -303,7 +307,7 @@ export function createStuckGenerationsJob(db: Db) {
                         lt(dailyInsights.updatedAt, sql`now() - interval '5 minutes'`)
                     )
                 )
-                .returning({ date: dailyInsights.date });
+                .returning({ userId: dailyInsights.userId, date: dailyInsights.date });
 
             const compatibility = await db
                 .update(compatibilityPeopleScores)
@@ -314,7 +318,7 @@ export function createStuckGenerationsJob(db: Db) {
                         lt(compatibilityPeopleScores.updatedAt, sql`now() - interval '5 minutes'`)
                     )
                 )
-                .returning({ date: compatibilityPeopleScores.date });
+                .returning({ personId: compatibilityPeopleScores.personId, date: compatibilityPeopleScores.date });
 
             const moon = await db
                 .update(moonInsights)
@@ -325,9 +329,103 @@ export function createStuckGenerationsJob(db: Db) {
                         lt(moonInsights.updatedAt, sql`now() - interval '5 minutes'`)
                     )
                 )
-                .returning({ date: moonInsights.date });
+                .returning({ userId: moonInsights.userId, date: moonInsights.date });
 
-            const stuck = insights.length + compatibility.length + moon.length;
+            /**
+             * Planets were missing from this sweep entirely, so a run that died left the
+             * row `pending` for ever — the client polled a day nobody was writing, and
+             * with credits in play that is a permanently swallowed charge with nothing
+             * to trigger the refund.
+             */
+            const planets = await db
+                .update(planetInsights)
+                .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
+                .where(
+                    and(
+                        eq(planetInsights.status, "pending"),
+                        lt(planetInsights.updatedAt, sql`now() - interval '5 minutes'`)
+                    )
+                )
+                .returning({ userId: planetInsights.userId, date: planetInsights.date });
+
+            /**
+             * A chat answer whose run died mid-write. Unlike the tables above, the row
+             * keeps whatever text arrived before the process went — a half-written
+             * answer with a retry underneath it is worth more than an empty bubble.
+             *
+             * The retry claim in the chat route takes such a row back on its own after
+             * the same timeout, so correctness does not depend on this either. It exists
+             * so the reader stops watching a stream nobody is writing.
+             */
+            const chat = await db
+                .update(chatMessages)
+                .set({
+                    status: "failed",
+                    errorCode: "generation_timeout",
+                    updatedAt: sql`date_trunc('milliseconds', now())`,
+                })
+                .where(
+                    and(
+                        eq(chatMessages.status, "streaming"),
+                        lt(chatMessages.updatedAt, sql`now() - interval '5 minutes'`)
+                    )
+                )
+                .returning({ id: chatMessages.id, userId: chatMessages.userId, chargeKey: chatMessages.chargeKey });
+
+            /**
+             * Give back what the timed-out runs cost.
+             *
+             * Only rows this sweep actually took are refunded, and `refundUnlock` deletes
+             * and returns exactly once — so a dying run racing this job over the same row
+             * refunds it once between them.
+             *
+             * Compatibility rows are skipped: the unlock is keyed on the reader, and this
+             * table only carries the person. The route's own failure path refunds those,
+             * and the claim in the route takes a stale `pending` back on its own after
+             * the same timeout, so nothing is left stuck.
+             */
+            const refunds: Promise<unknown>[] = [
+                ...insights.map((row) =>
+                    refundUnlock(db, {
+                        userId: row.userId,
+                        feature: "dailyInsight",
+                        resourceKey: creditKeys.dailyInsight(row.date),
+                    })
+                ),
+                ...moon.map((row) =>
+                    refundUnlock(db, {
+                        userId: row.userId,
+                        feature: "moonInsight",
+                        resourceKey: creditKeys.moonInsight(row.date),
+                    })
+                ),
+                ...planets.map((row) =>
+                    refundUnlock(db, {
+                        userId: row.userId,
+                        feature: "planetInsight",
+                        resourceKey: creditKeys.planetInsight(row.date),
+                    })
+                ),
+                ...chat
+                    .filter((row) => row.chargeKey !== null)
+                    .map((row) =>
+                        refundUnlock(db, {
+                            userId: row.userId,
+                            feature: "chatMessage",
+                            resourceKey: creditKeys.chatMessage(row.chargeKey!),
+                        })
+                    ),
+            ];
+
+            const settled = await Promise.allSettled(refunds);
+
+            for (const result of settled) {
+                if (result.status === "rejected") {
+                    console.error("[CRON ERROR] Failed to refund a timed-out generation", result.reason);
+                }
+            }
+
+            const stuck = insights.length + compatibility.length + moon.length + planets.length + chat.length;
 
             if (stuck > 0) {
                 console.log("[CRON] Timed out", stuck, "stuck generation(s)");

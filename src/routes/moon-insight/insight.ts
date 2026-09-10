@@ -10,32 +10,27 @@ import { z } from "zod";
 import { aiGenerations, dailyInsights, moonInsights, profile as profileTable } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { MOON_PHASES, TransitChart } from "../../modules/astro";
+import { creditKeys } from "../../modules/credits/keys";
+import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../modules/credits/service";
 import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyScore";
 import { getOrCreateTransits, scoreProfileForDate } from "../../modules/dailyScore/service";
 import { DailyScoreResult, PlanetContact } from "../../modules/dailyScore/types";
-import { generateMoonInsight, MoonTeaser } from "../../modules/moon/ai";
+import { GenerationStatus } from "../../modules/insights";
+import { generateMoonInsight, MoonInsightContent, MoonTeaser } from "../../modules/moon/ai";
 import { describeMoonDay, MOON_VARIANTS, MoonToday } from "../../modules/moon/today";
 import { SINGS_MAP } from "../../utils/natalUtils";
-import { errorSchema } from "../../utils/zodResponse";
+import { accessSchema, errorSchema, insufficientCreditsSchema } from "../../utils/zodResponse";
 
 dayjs.extend(utc);
 
 /**
- * How many lunar contacts the screen and the prompt both get. Higher than the default
- * three the horoscope panel uses: there the Moon is one body among ten, here it is the
- * entire subject.
+ * Today's transit-Moon → natal contacts, strongest first.
  *
- * One constant for both on purpose — the text is written from these aspects, so showing
- * a different set underneath it would caption the copy with something it never saw.
+ * On the shared limit rather than one of its own: every screen now shows every aspect a
+ * body really makes, so there is nothing left for this one to widen.
  */
-const LUNAR_CONTACT_LIMIT = 6;
-
-/** Today's transit-Moon → natal contacts, strongest first. */
 function lunarContacts(score: DailyScoreResult): PlanetContact[] {
-    return (
-        summarizePlanetInfluence(score.impacts, LUNAR_CONTACT_LIMIT).find((planet) => planet.name === "moon")
-            ?.contacts ?? []
-    );
+    return summarizePlanetInfluence(score.impacts).find((planet) => planet.name === "moon")?.contacts ?? [];
 }
 
 /**
@@ -81,7 +76,13 @@ const responseSchema = z.object({
                 supportive: z.boolean(),
             })
         ),
+        access: accessSchema,
         content: z.discriminatedUnion("status", [
+            /**
+             * Nobody has paid for this day yet. Everything above stays on screen —
+             * only the written half costs anything.
+             */
+            z.object({ status: z.literal("locked"), data: z.null(), error: z.null() }),
             z.object({ status: z.literal("pending"), data: z.null(), error: z.null() }),
             z.object({
                 status: z.literal("failed"),
@@ -96,7 +97,7 @@ const responseSchema = z.object({
                      * line and the client renders them as separate paragraphs.
                      */
                     insight: z.array(z.string()),
-                    contacts: z.record(
+                    aspects: z.record(
                         z.string(),
                         z.object({
                             id: z.string(),
@@ -276,10 +277,24 @@ async function generate(
             }
         }
 
-        await fastify.db
+        const failed = await fastify.db
             .update(moonInsights)
             .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
-            .where(owned);
+            .where(owned)
+            .returning({ date: moonInsights.date });
+
+        /**
+         * Give the credits back, and revoke the unlock with them. Guarded on the update
+         * having matched, so only the run that owned this row refunds; `refundUnlock`
+         * deletes and returns exactly once, so the sweeper racing it gives back nothing.
+         */
+        if (failed.length > 0) {
+            await refundUnlock(fastify.db, {
+                userId,
+                feature: "moonInsight",
+                resourceKey: creditKeys.moonInsight(date),
+            }).catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Failed to refund credits"));
+        }
     })().catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Moon generation crashed"));
 }
 
@@ -315,7 +330,7 @@ async function ensureRow(
 
 async function buildResponse(
     db: FastifyInstance["db"],
-    input: { userId: string; profile: typeof profileTable.$inferSelect; date: string }
+    input: { userId: string; profile: typeof profileTable.$inferSelect; date: string; access: AccessState }
 ): Promise<ResponseData> {
     const { date, userId } = input;
 
@@ -341,28 +356,51 @@ async function buildResponse(
         aspects: contacts.map((contact) => toContactSummary(contact)),
         // `absent` is reported as pending: the read path claims the generation before it
         // answers, so the client never has to know that state exists.
-        content:
-            stored?.status === "ready" && stored.content
-                ? {
-                      status: "ready" as const,
-                      // Rows written before captions and chips existed carry neither.
-                      // Empty is the honest answer, and the screen simply falls back to
-                      // the numbers rather than the response failing to serialize.
-                      data: {
-                          ...stored.content,
-                          contacts: stored.content.contacts ?? {},
-                          activities: stored.content.activities ?? { supported: [], avoid: [] },
-                      },
-                      error: null,
-                  }
-                : stored?.status === "failed"
-                  ? {
-                        status: "failed" as const,
-                        data: null,
-                        error: { code: "generation_failed", message: "Generating today's Moon reading failed." },
-                    }
-                  : { status: "pending" as const, data: null, error: null },
+        access: input.access,
+        content: describeContent(stored, input.access),
     };
+}
+
+/**
+ * How the written half is reported.
+ *
+ * Order matters. A day already written is `ready` whatever the wallet says — it was
+ * paid for once and stays bought. After that an unowned day is `locked`, checked before
+ * `failed` because a generation that failed was refunded and its unlock revoked, so
+ * reporting the stale failure would offer a retry that silently costs money.
+ */
+function describeContent(
+    stored: { content: MoonInsightContent | null; status: GenerationStatus } | undefined,
+    access: AccessState
+): ResponseData["content"] {
+    if (stored?.status === "ready" && stored.content) {
+        return {
+            status: "ready",
+            // Rows written before captions and chips existed carry neither. Empty is the
+            // honest answer, and the screen falls back to the numbers rather than the
+            // response failing to serialize.
+            data: {
+                ...stored.content,
+                aspects: stored.content.contacts ?? {},
+                activities: stored.content.activities ?? { supported: [], avoid: [] },
+            },
+            error: null,
+        };
+    }
+
+    if (!access.unlocked) {
+        return { status: "locked", data: null, error: null };
+    }
+
+    if (stored?.status === "failed") {
+        return {
+            status: "failed",
+            data: null,
+            error: { code: "generation_failed", message: "Generating today's Moon reading failed." },
+        };
+    }
+
+    return { status: "pending", data: null, error: null };
 }
 
 export default (async (fastify) => {
@@ -441,10 +479,17 @@ export default (async (fastify) => {
             try {
                 const date = dayjs.utc(request.query.date).format("YYYY-MM-DD");
 
+                const access = await checkAccess(fastify.db, {
+                    userId: session.user.id,
+                    feature: "moonInsight",
+                    resourceKey: creditKeys.moonInsight(date),
+                });
+
                 const data = await buildResponse(fastify.db, {
                     userId: session.user.id,
                     profile: session.profile,
                     date,
+                    access,
                 });
 
                 /**
@@ -458,7 +503,7 @@ export default (async (fastify) => {
                  * row exists; a day with no content is reported as `pending` either way,
                  * so the answer is already the one this claim is about to make true.
                  */
-                if (!data.content.data) {
+                if (access.unlocked && !data.content.data) {
                     await generate(fastify, {
                         userId: session.user.id,
                         profile: session.profile,
@@ -506,6 +551,7 @@ export default (async (fastify) => {
                 response: {
                     202: responseSchema,
                     401: errorSchema,
+                    402: insufficientCreditsSchema,
                     409: errorSchema,
                     500: errorSchema,
                 },
@@ -534,6 +580,33 @@ export default (async (fastify) => {
                 await ensureRow(fastify.db, { userId: session.user.id, profile: session.profile, date });
 
                 /**
+                 * The purchase. This endpoint is both the unlock and the retry, and the
+                 * unlock row is what tells them apart: a reader who already owns the day
+                 * is charged nothing, so retrying something they paid for is free.
+                 */
+                const spend = await spendCredits(fastify.db, {
+                    userId: session.user.id,
+                    feature: "moonInsight",
+                    resourceKey: creditKeys.moonInsight(date),
+                });
+
+                if (!spend.ok) {
+                    return reply.status(402).send({
+                        error: {
+                            code: "insufficient_credits" as const,
+                            message: "Not enough credits to unlock this reading.",
+                            silent: true as const,
+                            details: {
+                                feature: "moonInsight",
+                                cost: spend.cost,
+                                balance: spend.balance,
+                                nextCreditAt: spend.nextCreditAt?.toISOString() ?? null,
+                            },
+                        },
+                    });
+                }
+
+                /**
                  * Retry after a failure — the one path allowed to claim a `failed` day.
                  * Claimed before the response is built, so the client is told `pending`
                  * and starts polling instead of reading back the failure it just retried.
@@ -549,6 +622,11 @@ export default (async (fastify) => {
                     userId: session.user.id,
                     profile: session.profile,
                     date,
+                    access: await checkAccess(fastify.db, {
+                        userId: session.user.id,
+                        feature: "moonInsight",
+                        resourceKey: creditKeys.moonInsight(date),
+                    }),
                 });
 
                 return reply.status(202).send({ data });

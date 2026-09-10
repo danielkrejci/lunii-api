@@ -17,11 +17,11 @@ export interface NormalizerConfig {
  * src/modules/dailyScore/rules.ts changes.
  */
 export const CALIBRATION: Record<LifeArea | "overall", NormalizerConfig> = {
-    love: { median: 1.3, sigma: 6.01 },
-    career: { median: -1.59, sigma: 6.66 },
-    health: { median: -2.03, sigma: 4.62 },
-    mood: { median: -0.48, sigma: 4.46 },
-    overall: { median: -0.23, sigma: 4.3 },
+    love: { median: 0.97, sigma: 5.32 },
+    career: { median: -1.42, sigma: 5.62 },
+    health: { median: -2.24, sigma: 4.55 },
+    mood: { median: -1.09, sigma: 4.62 },
+    overall: { median: -0.38, sigma: 3.59 },
 };
 
 /**
@@ -30,11 +30,11 @@ export const CALIBRATION: Record<LifeArea | "overall", NormalizerConfig> = {
  * every day and Neptune ~5, which says nothing about today.
  */
 export const PLANET_CALIBRATION: Record<Planet, NormalizerConfig> = {
-    sun: { median: 12.35, sigma: 7.28 },
-    moon: { median: 10.27, sigma: 6.12 },
-    mercury: { median: 9.8, sigma: 5.9 },
-    venus: { median: 11.06, sigma: 6.55 },
-    mars: { median: 10.24, sigma: 6.14 },
+    sun: { median: 6.79, sigma: 4 },
+    moon: { median: 16.43, sigma: 9.79 },
+    mercury: { median: 5.39, sigma: 3.25 },
+    venus: { median: 6.08, sigma: 3.6 },
+    mars: { median: 5.63, sigma: 3.38 },
     jupiter: { median: 3.4, sigma: 2.04 },
     saturn: { median: 3.62, sigma: 2.07 },
     uranus: { median: 2.35, sigma: 1.5 },
@@ -58,4 +58,4 @@ export const NO_BIRTH_TIME_CONFIDENCE_PENALTY = 0.85;
  * depend on. PLANET_CALIBRATION is computed fresh on every request and stored
  * nowhere, so changing it must not mark existing rows stale.
  */
-export const CALIBRATION_VERSION = "2026-08-05-f2a5a17b";
+export const CALIBRATION_VERSION = "2026-09-01-02b0a2d7";

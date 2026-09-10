@@ -73,14 +73,29 @@ export const OUTER_PLANETS: readonly Planet[] = ["uranus", "neptune", "pluto"];
  */
 export const PERSONAL_POINTS: readonly NatalPoint[] = ["sun", "moon", "mercury", "venus", "mars", "ascendant"];
 
-export type Layer = "fast" | "slow";
+/**
+ * How long a transit from this body stays on the same aspect — which is what decides
+ * whether it can move a DAILY score at all.
+ *
+ * Named after the timescale rather than after speed, because that is the question the
+ * gain answers. With an orb of 7–8°, the body's speed sets how long a hit lasts:
+ *
+ *   daily    Moon      13.2°/day   an aspect lasts about a day
+ *   weekly   Sun..Mars 0.5–1.4°/day   the same aspect holds for 10–20 days
+ *   slow     Jupiter+  under 0.1°/day  months to years
+ *
+ * `weekly` used to be lumped in with the Moon as one "fast" layer, which is why four
+ * bodies that hold their aspect for a fortnight set the level of a score that is read
+ * as today's. Splitting them is what `LAYER_GAIN` acts on.
+ */
+export type Layer = "daily" | "weekly" | "slow";
 
 export const LAYER: Record<Planet, Layer> = {
-    moon: "fast",
-    mercury: "fast",
-    venus: "fast",
-    sun: "fast",
-    mars: "fast",
+    moon: "daily",
+    mercury: "weekly",
+    venus: "weekly",
+    sun: "weekly",
+    mars: "weekly",
     jupiter: "slow",
     saturn: "slow",
     uranus: "slow",

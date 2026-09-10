@@ -24,6 +24,107 @@ pnpm tsx src/scripts/analyzeDailyScoreRules.ts --top 30
 
 ---
 
+## 2026-09-01 — Split `fast` into `daily` and `weekly`, and sharpened every rule's areas
+
+Reported from real use: overall sat at 15–24 % for a whole week, and love, career and
+health barely moved from each other while only mood varied. Reproduced exactly on the
+reporting chart (12. 3. 1998, Prague) — 23. 8. to 1. 9. scored `21 21 27 22 20 15 25 30
+18 27`.
+
+### The two measured causes
+
+**One. The `fast` layer was not daily.** Only the Moon moves 13.2°/day. Sun, Mercury,
+Venus and Mars move 0.5–1.4°/day, so inside a 7–8° orb one of their aspects holds for
+10–20 days — yet all five shared `LAYER_GAIN.fast = 1.0`. Measured over 60 charts × 365
+days, those four bodies produced **72 % of the score's movement** against the Moon's 16 %.
+Consequence: lag-1 autocorrelation of raw overall **0.82** (career 0.90, love 0.86, mood
+0.70 — which is why mood was the one area that visibly moved), lag-7 still 0.33. A week
+was one state. 28 of 100 sampled charts had a week averaging under 25 with a spread under
+15 points.
+
+The per-user baseline was *not* the cause, and this was checked before changing anything:
+over a full year every sampled user averages 50–63 overall, and the population median on
+the reported day was 61. The low week was a low week, not a low chart.
+
+**Two. `mood` was a sink.** It took a share in **177 of 177 rules** (career 153, health
+141, love 63), rules touched 3.02 areas on average, only 27 of 177 had a dominant share
+≥ 0.70, and **54 shares in the table were under 0.15** — noise that only served to couple
+the areas. With a median 29 aspects contributing per day, the central limit did the rest.
+
+### What did NOT work, measured before being discarded
+
+**Recentring each user on their own rolling median** — the fix this changelog proposed on
+2026-08-05 under "Known consequence". At ±45 or ±21 days it makes the flat weeks *worse*
+(107 → 118 and → 98 of 150 users), because the between-user offset it corrects is already
+small. At ±10 days it does remove them, at the cost of the same-day area spread (30 → 21)
+and the range (69 → 53). Re-tested on top of the changes below: flat weeks go to 0, but
+the area spread falls back 37 → 30 and days above 80 collapse from 17 % to 7 %. Rejected —
+it pays back exactly what the change buys.
+
+**Computing `overall` from the four displayed scores** instead of from the raw sums, to fix
+`overall` disagreeing with the four numbers above it. On the reporting chart the two
+differ by ≤ 2 points on most days and the mean deviation from the four-area average gets
+*worse* (6.0 → 7.0). The disagreement comes from rescaling to the full range, not from
+using raw values: an un-rescaled weighted mean of the four scores agrees exactly but lives
+in a 33–68 band. Kept as it is.
+
+### What was changed
+
+**`Layer` is now `daily` | `weekly` | `slow`**, with `LAYER_GAIN` 1.6 / 0.55 / 0.35. Same
+argument that took `slow` to 0.35 on 2026-08-05, applied to the four bodies it had missed.
+
+**Every rule's `areas` sharpened**: shares below 0.15 dropped, the rest squared and
+renormalised. Monotone, so no rule changes which area it leads with — the three Moon pairs
+that must stay mood-dominant (`moon-moon`, `moon-sun`, `moon-saturn`) still are. Dominant
+share went 0.53 → 0.67 mean, areas per rule 3.02 → 2.71.
+
+**Recalibrated**, target unchanged at p10 25 / p90 85.
+
+### Result
+
+60 charts × 365 days, and the population distribution held (p10 25.0, p50 57, p90 85.0):
+
+| | before | after |
+|---|---|---|
+| love, points/day | 8.6 | **15.7** |
+| career | 7.1 | **12.5** |
+| health | 10.6 | **19.8** |
+| mood | 13.1 | **21.9** |
+| overall | 10.2 | **18.2** |
+| 7-day window range, overall | 30 | **46** |
+| lag-1 autocorrelation, raw overall | 0.82 | **0.39** |
+| charts with a flat low week | 28/100 | **1/100** |
+| same-day area spread, median | 30 | **35** |
+| corr career–mood | 0.75 | **0.48** |
+| corr career–health | 0.59 | **0.25** |
+| corr love–mood | 0.49 | **0.33** |
+| days below 10 / above 90 | 0.5 % / 2.3 % | **1.2 % / 5.2 %** |
+
+The reporting chart, same fortnight, before → after:
+
+```
+           19.8 20.8 21.8 22.8 23.8 24.8 25.8 26.8 27.8 28.8 29.8 30.8 31.8  1.9
+  before     67   56   34   33   21   21   27   22   20   15   25   30   18   27
+  after      81   69   33   37   19   21   38   31   30   21   47   53   17   24
+```
+
+Its low stretch is still a low stretch — the average over 20 days rose only 34 → 42, which
+is correct, because the sky did not change. What changed is that it is no longer flat: the
+range went 52 → 64 and day-to-day movement 9.5 → 16.2.
+
+### Known consequence
+
+`analyzeDailyScoreRules` reports `mood` as the sole highest area on 17.0 % of user-days
+against a balanced 25 % — it lost the most from the sharpening, having been the sink.
+Worth a look if mood starts reading as an afterthought.
+
+### Evidence
+
+`lintDailyScoreRules` 0 errors / 0 warnings, `analyzeDynamics`, `analyzeDailyScoreRules`,
+`calibrateDailyScore --charts 300 --days 730 --write`, 27 tests passing, `tsc` clean.
+
+---
+
 ## 2026-08-30 — The planetary panel moved to its own on-demand route
 
 **What** — the ten planet texts are no longer written by the daily horoscope generation.

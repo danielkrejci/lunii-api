@@ -2,13 +2,17 @@
  * Simulates the levers that make the score behave like a daily forecast rather than
  * a trend. Writes nothing.
  *
- *   pnpm tsx src/scripts/simulateWeather.ts [--slowgain 0.6] [--p10 38] [--p90 74] [--mooncap 1]
+ *   pnpm tsx src/scripts/simulateWeather.ts [--weeklygain 0.55] [--dailygain 1.6]
+ *       [--slowgain 0.35] [--p10 25] [--p90 85] [--mooncap 1]
  *
- * Three levers:
+ * Four levers:
  *
- *   --slowgain   LAYER_GAIN.slow. Lowering it moves the score's LEVEL from slow
- *                bodies to fast ones, so the level itself changes day to day
- *                instead of drifting. This is the amplitude of the daily signal.
+ *   --weeklygain LAYER_GAIN.weekly, and the one that matters most. Sun, Mercury,
+ *                Venus and Mars hold one aspect for 10-20 days, so whatever weight
+ *                they carry becomes the score's LEVEL rather than its movement.
+ *   --dailygain  LAYER_GAIN.daily. The Moon is the only body that can change a
+ *                score overnight; this is the amplitude of the daily signal.
+ *   --slowgain   LAYER_GAIN.slow. Same argument as weekly, over months.
  *   --p10/--p90  the calibration target. Sigma is not just range, it is gain: a
  *                narrower sigma amplifies day-to-day differences and widens the
  *                range at the same time.
@@ -27,13 +31,17 @@ import { LAYER_GAIN } from "../modules/dailyScore/factors";
 import { ASPECT_RULES } from "../modules/dailyScore/rules";
 import { argValue, buildSample, mean, percentile } from "./sampling";
 
+const dailyGain = argValue("dailygain", LAYER_GAIN.daily);
+const weeklyGain = argValue("weeklygain", LAYER_GAIN.weekly);
 const slowGain = argValue("slowgain", LAYER_GAIN.slow);
-const targetP10 = argValue("p10", 38);
-const targetP90 = argValue("p90", 74);
+const targetP10 = argValue("p10", 25);
+const targetP90 = argValue("p90", 85);
 const moonCap = argValue("mooncap", 1);
 const chartCount = argValue("charts", 40);
 const dayCount = argValue("days", 365);
 
+LAYER_GAIN.daily = dailyGain;
+LAYER_GAIN.weekly = weeklyGain;
 LAYER_GAIN.slow = slowGain;
 
 if (moonCap < 1) {

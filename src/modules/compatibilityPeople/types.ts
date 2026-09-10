@@ -79,13 +79,7 @@ export const RELATIONSHIP_CATEGORIES = ["emotional", "communication", "chemistry
 
 export type RelationshipCategory = (typeof RELATIONSHIP_CATEGORIES)[number];
 
-export const INSIGHT_DIRECTIONS = ["positive", "neutral", "negative"] as const;
-
-export type InsightDirection = (typeof INSIGHT_DIRECTIONS)[number];
-
 export type TransitCategory = "emotional" | "love" | "communication" | "motivation";
-
-export type Category = RelationshipCategory | TransitCategory;
 
 export interface RelationshipRule {
     planetA: Planet;

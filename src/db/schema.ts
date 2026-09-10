@@ -17,8 +17,10 @@ import {
 } from "drizzle-orm/pg-core";
 
 import { NatalChart } from "../modules/astro";
-import { DailyOverviewResponse } from "../modules/compatibilityPeople/ai";
+import { ChatMessageStatus, ChatRole } from "../modules/chat/types";
+import { CompatibilityInsightContent } from "../modules/compatibilityPeople/ai";
 import { CompatibilityResult, DailyCompatibilityResult } from "../modules/compatibilityPeople/types";
+import { CreditFeature, CreditLedgerReason, RevenuecatEventStatus, SubscriptionStatus } from "../modules/credits/types";
 import { DailyInsightContent, GenerationStatus } from "../modules/insights";
 import { PlanetInsightContent } from "../modules/insights/planets";
 import { MoonInsightContent } from "../modules/moon/ai";
@@ -38,7 +40,9 @@ export const aiGenerations = pgTable("ai_generations", {
     provider: text("provider").notNull(),
     model: text("model").notNull(),
     type: text("type")
-        .$type<"dailyInsight" | "moonInsight" | "planetInsight" | "compatibilityPeople" | "personalityProfile">()
+        .$type<
+            "dailyInsight" | "moonInsight" | "planetInsight" | "compatibilityPeople" | "personalityProfile" | "chat"
+        >()
         .notNull(),
     status: text("status").$type<"success" | "error">().notNull(),
     error: text("error"),
@@ -51,6 +55,421 @@ export const aiGenerations = pgTable("ai_generations", {
     cost: numeric("cost", { mode: "number" }).notNull(),
 });
 
+export const chatConversations = pgTable(
+    "chat_conversations",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+
+        /** Derived from the first message. Never null — a thread is created with one. */
+        title: text("title").notNull(),
+
+        /**
+         * What the list is ordered by. Separate from `updated_at`, which moves for
+         * reasons the reader never sees — a title rewrite, a soft delete — and would
+         * reshuffle the list without a message having been sent.
+         */
+        lastMessageAt: timestamp("last_message_at").defaultNow().notNull(),
+
+        /**
+         * The next `message_order` to hand out. Claimed with a single
+         * `set next_order = next_order + n returning next_order`, which locks the row
+         * for the duration — so two messages sent at once can never share a position.
+         */
+        nextOrder: integer("next_order").default(1).notNull(),
+
+        /**
+         * Set instead of deleting. Deleting a thread is something the reader does to
+         * their own screen, not a decision about retention, and the row is what the
+         * `ai_generations` audit was written against. Every read filters on `is null`.
+         */
+        deletedAt: timestamp("deleted_at"),
+
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        updatedAt: timestamp("updated_at")
+            .defaultNow()
+            .$onUpdate(() => new Date())
+            .notNull(),
+    },
+    (table) => [
+        // The list query, exactly: one user's live threads, newest first.
+        index("chat_conversations_user_last_message_idx")
+            .on(table.userId, table.lastMessageAt.desc())
+            .where(sql`deleted_at is null`),
+    ]
+);
+
+export const chatMessages = pgTable(
+    "chat_messages",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        conversationId: text("conversation_id")
+            .notNull()
+            .references(() => chatConversations.id, { onDelete: "cascade" }),
+
+        /**
+         * Denormalised from the conversation so every ownership check and every page of
+         * history is one index lookup rather than a join. It is also what keeps the
+         * check honest: a query that forgets the reader is visibly wrong where it is
+         * written, rather than quietly wrong inside a join condition.
+         */
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+
+        /**
+         * Total order within the thread, and the pagination cursor.
+         *
+         * `created_at` cannot be either: two rows written in the same millisecond have
+         * no defined order between them, and a cursor on a timestamp needs a tiebreaker
+         * regardless.
+         *
+         * The column is `message_order` rather than `order` because ORDER is reserved
+         * in Postgres — Drizzle quotes it, but every hand-written query and every psql
+         * session would have to remember to as well.
+         */
+        order: integer("message_order").notNull(),
+
+        role: text("role").$type<ChatRole>().notNull(),
+
+        /**
+         * Whole on insert for a reader's message. An assistant's accumulates: partial
+         * while the model is writing, complete once `ready`, and whatever arrived before
+         * the failure when `failed` — a half-written answer is still worth showing.
+         */
+        content: text("content").notNull().default(""),
+
+        /**
+         * `streaming` is this run's claim on the row. As in `daily_insights`,
+         * `updated_at` carries the claim and doubles as the timeout for a run that died
+         * mid-flight — so nothing outside that lifecycle may write to this row, and
+         * `$onUpdate` must stay off.
+         */
+        status: text("status").$type<ChatMessageStatus>().default("ready").notNull(),
+
+        /** A code, not a sentence: the client owns the wording. Null unless failed. */
+        errorCode: text("error_code"),
+
+        /**
+         * The client's own id for the send. A retried POST — a flaky network, a
+         * backgrounded app — carries the same one and attaches to the message already
+         * written instead of asking a second time. Null on assistant rows.
+         */
+        clientId: text("client_id"),
+
+        /**
+         * The send that paid for this answer — the reader's `client_id`, copied onto the
+         * assistant row.
+         *
+         * Not `client_id` itself: that column is unique per reader and is what makes a
+         * retried POST attach rather than ask twice. This is here so a failed answer can
+         * find the credit it cost and give it back, from the stream and from the sweeper
+         * alike. Overwritten by a retry, which pays again — so it always names the charge
+         * a refund should reverse. Null on a reader's own row, and on anything written
+         * before credits existed.
+         */
+        chargeKey: text("charge_key"),
+
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    },
+    (table) => [
+        // The order, the pagination query and the guarantee of no duplicate position.
+        uniqueIndex("chat_messages_conversation_order_idx").on(table.conversationId, table.order),
+
+        // The stuck-run sweeper, and the "is anything already running for me" guard.
+        index("chat_messages_streaming_idx")
+            .on(table.updatedAt)
+            .where(sql`status = 'streaming'`),
+
+        /**
+         * One row per client attempt, scoped to the reader rather than to the thread:
+         * the send that most needs protecting is the one that opens a conversation,
+         * and at that moment there is no `conversation_id` to be unique within. Ids are
+         * UUIDs, so nothing is lost by widening the scope. Partial, because only a
+         * reader's message carries one.
+         */
+        uniqueIndex("chat_messages_user_client_id_idx")
+            .on(table.userId, table.clientId)
+            .where(sql`client_id is not null`),
+
+        /**
+         * The same contract every generated table here keeps: `ready` means whole. The
+         * insight tables spell it as "content is not null"; text that is present but
+         * empty is the same lie, so this one measures it.
+         */
+        check(
+            "chat_messages_ready_has_content",
+            sql`(${table.status} <> 'ready' or length(btrim(${table.content})) > 0)`
+        ),
+
+        // A reader's message is never generated, so it can never be mid-flight.
+        check("chat_messages_user_is_ready", sql`(${table.role} <> 'user' or ${table.status} = 'ready')`),
+    ]
+);
+
+export const creditAccounts = pgTable(
+    "credit_accounts",
+    {
+        userId: text("user_id")
+            .primaryKey()
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+
+        /**
+         * Credits banked as of `balance_updated_at`, not as of now. What a reader
+         * actually has is this plus the whole hours since — see `balance_updated_at`.
+         *
+         * May exceed `CREDIT_CAP`: a bought pack is not regeneration and must not be
+         * eaten by it. Never negative — a clawback on a refunded pack clamps at zero
+         * rather than putting a reader in debt, and the ledger records what was in fact
+         * applied.
+         */
+        balance: integer("balance").notNull(),
+
+        /**
+         * The accrual anchor: the instant from which whole hours have not yet been
+         * credited. NOT "when this row was last touched", and the distinction is the
+         * whole design.
+         *
+         * Accrual advances it by `floor(elapsed_hours)` hours and no further, so the
+         * part-hour survives every read and every spend. Setting it to `now()` — the
+         * obvious thing — would push the next credit back to a full hour every time the
+         * app was opened, and a reader who spends at half past would silently lose
+         * thirty minutes.
+         *
+         * The alternative was an hourly cron topping everyone up. Rejected: there is no
+         * distributed lock here (see `createStuckGenerationsJob`), so a second instance
+         * would double-grant; a missed run silently costs everyone an hour; and it
+         * writes every row in the table to express something that is a subtraction of
+         * two timestamps.
+         *
+         * Written only ever from SQL `now()` arithmetic, never from a JS `Date`.
+         */
+        balanceUpdatedAt: timestamp("balance_updated_at", { withTimezone: true }).defaultNow().notNull(),
+
+        createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    },
+    (table) => [check("credit_accounts_balance_non_negative", sql`${table.balance} >= 0`)]
+);
+
+export const creditLedger = pgTable(
+    "credit_ledger",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+
+        /** Signed. Negative is a spend or a clawback, positive a grant or a refund. */
+        delta: integer("delta").notNull(),
+
+        /** What this row left behind, so a dispute is answered by reading, not replaying. */
+        balanceAfter: integer("balance_after").notNull(),
+
+        reason: text("reason").$type<CreditLedgerReason>().notNull(),
+
+        /**
+         * What it was for. Null on a purchase or a grant.
+         *
+         * Denormalised rather than a foreign key to `credit_unlocks`: a refund deletes
+         * the unlock, and an append-only ledger must not have rows quietly cascade out
+         * from under it.
+         */
+        feature: text("feature").$type<CreditFeature>(),
+        resourceKey: text("resource_key"),
+
+        /**
+         * The thing that must not happen twice, named. A store transaction id for a
+         * purchase, `refund:<transaction id>` for a clawback.
+         *
+         * Null for a spend — a spend is made idempotent by the unlock row instead, in
+         * the same transaction.
+         */
+        idempotencyKey: text("idempotency_key"),
+
+        /** The payload the decision was made from, when there was one. */
+        metadata: jsonb("metadata"),
+
+        createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    },
+    (table) => [
+        // The statement a reader — or support — asks for: my history, newest first.
+        index("credit_ledger_user_created_idx").on(table.userId, table.createdAt.desc()),
+
+        // The guarantee that a webhook delivered twice grants once.
+        uniqueIndex("credit_ledger_idempotency_idx")
+            .on(table.idempotencyKey)
+            .where(sql`idempotency_key is not null`),
+
+        // A zero-delta row records nothing and could only ever be a bug leaking through.
+        check("credit_ledger_delta_non_zero", sql`${table.delta} <> 0`),
+    ]
+);
+
+export const creditUnlocks = pgTable(
+    "credit_unlocks",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+
+        feature: text("feature").$type<CreditFeature>().notNull(),
+
+        /**
+         * What was bought, canonically: a date for the day-shaped features,
+         * `<personId>:<date>` for a compatibility reading, the client's own send id for
+         * a chat message. Built in one place — `modules/credits/keys.ts` — so the string
+         * a debit writes and the string a check reads can never drift.
+         */
+        resourceKey: text("resource_key").notNull(),
+
+        /**
+         * What it cost when it was bought, so a refund gives back the price paid rather
+         * than today's. Zero for the rows the backfill grandfathered in, which is what
+         * stops a refund handing back credits nobody ever spent.
+         */
+        creditsSpent: integer("credits_spent").notNull(),
+
+        createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    },
+    (table) => [
+        /**
+         * The whole charging model in one constraint: pay once per user, per feature,
+         * per resource. It is also the mutual exclusion — the debit inserts here before
+         * the money moves, so two taps on the same horoscope block on each other and
+         * exactly one of them pays.
+         *
+         * A refund deletes the row rather than flagging it, which keeps this a plain
+         * unique index and keeps `on conflict` honest. The ledger is the audit trail;
+         * this table is only ever the answer to "is it open".
+         */
+        uniqueIndex("credit_unlocks_user_feature_resource_idx").on(table.userId, table.feature, table.resourceKey),
+        check("credit_unlocks_spent_non_negative", sql`${table.creditsSpent} >= 0`),
+    ]
+);
+
+export const subscriptions = pgTable(
+    "subscriptions",
+    {
+        userId: text("user_id")
+            .primaryKey()
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+
+        status: text("status").$type<SubscriptionStatus>().notNull(),
+
+        /**
+         * The only thing that actually ends entitlement. `canceled` means auto-renew is
+         * off, which is a fact about the next charge and not about today.
+         */
+        expiresAt: timestamp("expires_at", { withTimezone: true }),
+
+        productId: text("product_id").notNull(),
+        store: text("store").notNull(),
+        environment: text("environment").$type<"PRODUCTION" | "SANDBOX">().notNull(),
+
+        /** Whether the store intends to charge again. Display only — never gates access. */
+        willRenew: boolean("will_renew").default(true).notNull(),
+
+        /**
+         * The event this row was last written from. RevenueCat does not promise order,
+         * so an EXPIRATION delivered after the RENEWAL that superseded it must not be
+         * allowed to close a live subscription — every write is guarded on being newer.
+         */
+        lastEventAt: timestamp("last_event_at", { withTimezone: true }).notNull(),
+        lastEventId: text("last_event_id"),
+
+        createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+        updatedAt: timestamp("updated_at", { withTimezone: true })
+            .defaultNow()
+            .$onUpdate(() => new Date())
+            .notNull(),
+    },
+    (table) => [
+        // Any "who is entitled right now" question, and the renewal sweep.
+        index("subscriptions_expires_at_idx")
+            .on(table.expiresAt)
+            .where(sql`status in ('active', 'canceled', 'billing_issue')`),
+    ]
+);
+
+export const revenuecatCustomers = pgTable(
+    "revenuecat_customers",
+    {
+        /**
+         * RevenueCat's id for the buyer, which is not necessarily ours. The client calls
+         * `Purchases.logIn(user.id)`, but a purchase made before that call lands under an
+         * anonymous `$RCAnonymousID:...`, and RevenueCat keeps both as aliases of one
+         * customer. Every alias gets a row, all pointing at one user.
+         */
+        appUserId: text("app_user_id").primaryKey().notNull(),
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+        createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    },
+    (table) => [index("revenuecat_customers_user_idx").on(table.userId)]
+);
+
+export const revenuecatEvents = pgTable(
+    "revenuecat_events",
+    {
+        /**
+         * RevenueCat's own event id, as the primary key rather than as an indexed column.
+         * The insert IS the idempotency check: a row that does not come back is a
+         * delivery that has already been dealt with.
+         */
+        id: text("id").primaryKey().notNull(),
+
+        type: text("type").notNull(),
+        appUserId: text("app_user_id").notNull(),
+
+        /**
+         * Null when the buyer could not be mapped to a user yet — a purchase that arrived
+         * before the app finished signing in. Parked rather than dropped, and replayed by
+         * `POST /api/credits/sync` once the client says who it is.
+         */
+        userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
+
+        productId: text("product_id"),
+        environment: text("environment").notNull(),
+
+        /** RevenueCat's `event_timestamp_ms`, which is what orders events — not arrival. */
+        eventAt: timestamp("event_at", { withTimezone: true }).notNull(),
+
+        status: text("status").$type<RevenuecatEventStatus>().notNull(),
+        error: text("error"),
+
+        /** The whole body. The only place a dispute can be reconstructed from. */
+        payload: jsonb("payload").notNull(),
+
+        receivedAt: timestamp("received_at", { withTimezone: true }).defaultNow().notNull(),
+        processedAt: timestamp("processed_at", { withTimezone: true }),
+    },
+    (table) => [
+        // The replay query: everything still waiting for an owner, oldest first.
+        index("revenuecat_events_unmapped_idx")
+            .on(table.appUserId, table.eventAt)
+            .where(sql`status = 'unmapped'`),
+    ]
+);
+
 export const compatibilityPeopleScores = pgTable(
     "compatibility_people_scores",
     {
@@ -62,7 +481,7 @@ export const compatibilityPeopleScores = pgTable(
         compatibility: jsonb("compatibility").$type<DailyCompatibilityResult>().notNull(),
 
         /** The whole AI-written half. Null until generated, complete once it is. */
-        content: jsonb("content").$type<DailyOverviewResponse>(),
+        content: jsonb("content").$type<CompatibilityInsightContent>(),
 
         /**
          * Lifecycle of the generation. `updated_at` carries the time of its last change
