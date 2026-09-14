@@ -1,3 +1,4 @@
+import { MIN_ASPECT_SCORE, TOP_ASPECT_LIMIT } from "./factors";
 import { RELATIONSHIP_RULES, TRANSIT_RULES } from "./rules";
 import {
     AspectType,
@@ -14,20 +15,6 @@ import {
     ScoredTransitAspect,
     ScoredAspect,
 } from "./types";
-
-export const PLANET_WEIGHTS: Record<Planet, number> = {
-    moon: 1.0,
-
-    sun: 0.9,
-
-    mercury: 0.85,
-    venus: 0.85,
-
-    mars: 0.8,
-
-    jupiter: 0.35,
-    saturn: 0.2,
-};
 
 export const MAX_ORBS: Record<AspectType, number> = {
     conjunction: 8,
@@ -75,20 +62,6 @@ export const ASPECT_GROUP: Record<AspectType, TransitRule["aspect"]> = {
     opposition: "challenging",
 };
 
-export const ASPECT_STRENGTH: Record<AspectType, number> = {
-    conjunction: 1.0,
-
-    trine: 0.95,
-    sextile: 0.8,
-
-    square: 1.0,
-    opposition: 0.9,
-};
-
-export const NEGATIVE_WEIGHT = 0.5;
-
-export const MAX_DAILY_MODIFIER = 10;
-
 export const DAILY_TRANSIT_PLANETS: Planet[] = ["sun", "moon", "mercury", "venus", "mars", "jupiter", "saturn"];
 
 export function angularDistance(longitudeA: number, longitudeB: number): number {
@@ -121,10 +94,28 @@ export function getTransitRule(planetA: Planet, planetB: Planet, aspect: AspectT
     );
 }
 
-export function aggregateScore(aspects: ScoredAspect[]): ScoreTotals {
+/**
+ * Positive and negative totals, and the single number they collapse to.
+ *
+ * `negativeWeight` is explicit rather than a module constant because the two callers
+ * mean different things by a hard aspect: see RELATIONSHIP_NEGATIVE_WEIGHT and
+ * TRANSIT_NEGATIVE_WEIGHT in ./factors.
+ *
+ * `rankDecay` below 1 makes this a ranked sum instead of a flat one — the aspects are
+ * taken in the order given, which `selectTopAspects` has already sorted by absolute
+ * score. `positive` and `negative` stay undecayed: they are reported to the client and
+ * to the prompt as "how much support / how much friction is in play today", which is a
+ * question about the whole set, not about its leader.
+ */
+export function aggregateScore(aspects: ScoredAspect[], negativeWeight: number, rankDecay = 1): ScoreTotals {
     const positive = aspects.reduce((sum, aspect) => sum + aspect.positive, 0);
     const negative = aspects.reduce((sum, aspect) => sum + aspect.negative, 0);
-    const overall = positive - negative * NEGATIVE_WEIGHT;
+
+    const overall = aspects.reduce((sum, aspect, rank) => {
+        const weight = rankDecay ** rank;
+
+        return sum + (aspect.positive - aspect.negative * negativeWeight) * weight;
+    }, 0);
 
     return {
         positive,
@@ -204,7 +195,12 @@ export function calculateTransitAspects(transit: TransitChart, chart: NatalChart
     return aspects.sort((a, b) => a.orb - b.orb);
 }
 
-export function selectTopAspects<T extends ScoredAspect>(aspects: T[], limit = 7, minScore = 3): T[] {
+/** Strongest contacts first — the order `aggregateScore`'s rank decay then reads. */
+export function selectTopAspects<T extends ScoredAspect>(
+    aspects: T[],
+    limit = TOP_ASPECT_LIMIT,
+    minScore = MIN_ASPECT_SCORE
+): T[] {
     return [...aspects]
         .filter((a) => Math.abs(a.score) >= minScore)
         .sort((a, b) => Math.abs(b.score) - Math.abs(a.score))

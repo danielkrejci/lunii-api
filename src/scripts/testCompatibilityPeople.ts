@@ -15,8 +15,8 @@ import { desc } from "drizzle-orm";
 
 import { db } from "../db";
 import { compatibilityPeople, transit } from "../db/schema";
-import { calculateCompatibility, calculateDailyCompatibility } from "../modules/compatibilityPeople/aspects";
-import { normalizeScore, OVERALL_NORMALIZER } from "../modules/compatibilityPeople/normalizer";
+import { calculateCompatibility } from "../modules/compatibilityPeople/aspects";
+import { scoreDay } from "../modules/compatibilityPeople/daily";
 
 dayjs.extend(utc);
 dayjs.extend(isoWeek);
@@ -82,12 +82,12 @@ async function main() {
 
             const compatibility = calculateCompatibility(userNatalChart, partnerNatalChart);
 
-            const dailyCompatibility = calculateDailyCompatibility(planets, userNatalChart, partnerNatalChart);
-
-            const overallRaw = compatibility.overall + dailyCompatibility.modifier;
-
-            // const baseScore = normalizeScore(compatibility.overall, BASE_NORMALIZER);
-            const overallScore = normalizeScore(overallRaw, OVERALL_NORMALIZER);
+            const { compatibility: dailyCompatibility, score: overallScore } = scoreDay({
+                readerChart: userNatalChart,
+                personChart: partnerNatalChart,
+                baseOverall: compatibility.overall,
+                transits: planets,
+            });
 
             // console.log("compatibility today:", compatibilityToday);
             // console.log({

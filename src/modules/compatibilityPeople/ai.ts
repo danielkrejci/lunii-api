@@ -201,6 +201,13 @@ TODAY BETWEEN THEM
 
 Score today: ${input.score}/100
 
+This is today measured against THEIR OWN normal, not against other couples. 50 is an
+ordinary day for these two, whether they are a strong match or a hard one; 25 is a
+genuinely off day for them and 75 a genuinely good one. So a low score is never a verdict
+on the relationship — it is a bad Tuesday in it — and a high score is not a claim that
+they are well matched. How well matched they are is a separate number the reader also has,
+and it is not this one.
+
 How far today moves them from their usual: ${input.modifier.toFixed(1)}
 
 Supportive weight today: ${input.positiveTotal.toFixed(1)}

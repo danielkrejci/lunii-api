@@ -10,9 +10,8 @@ import { aiGenerations, compatibilityPeople, compatibilityPeopleScores } from ".
 import { auth } from "../../../lib/auth";
 import { NatalChart } from "../../../modules/astro";
 import { generateCompatibilityInsight } from "../../../modules/compatibilityPeople/ai";
-import { calculateDailyCompatibility } from "../../../modules/compatibilityPeople/aspects";
 import { CONTACT_SIDES, dailyContacts } from "../../../modules/compatibilityPeople/contacts";
-import { normalizeScore, OVERALL_NORMALIZER } from "../../../modules/compatibilityPeople/normalizer";
+import { scoreDay } from "../../../modules/compatibilityPeople/daily";
 import { creditKeys } from "../../../modules/credits/keys";
 import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../../modules/credits/service";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
@@ -175,15 +174,19 @@ async function loadPersonWithScore(
 
     const { planets } = await getOrCreateTransits(db, input.date, input.timezone);
 
-    const compatibility = calculateDailyCompatibility(planets, input.userChart, person.birthChart);
-    const overallRaw = person.baseCompatibility.overall + compatibility.modifier;
+    const { compatibility, score } = scoreDay({
+        readerChart: input.userChart,
+        personChart: person.birthChart,
+        baseOverall: person.baseCompatibility.overall,
+        transits: planets,
+    });
 
     await db
         .insert(compatibilityPeopleScores)
         .values({
             personId: person.id,
             date: input.date,
-            score: normalizeScore(overallRaw, OVERALL_NORMALIZER),
+            score,
             compatibility,
         })
         // Another request may have inserted the same (personId, date) meanwhile. The

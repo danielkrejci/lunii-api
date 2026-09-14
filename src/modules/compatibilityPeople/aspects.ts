@@ -1,3 +1,4 @@
+import { RANK_DECAY, RELATIONSHIP_NEGATIVE_WEIGHT, TRANSIT_NEGATIVE_WEIGHT } from "./factors";
 import { scoreAspect, scoreTransitAspect } from "./scoring";
 import { NatalChart, TransitChart } from "./types";
 import {
@@ -19,7 +20,9 @@ export function calculateCompatibility(chartA: NatalChart, chartB: NatalChart) {
     const scored = aspects.map((aspect) => scoreAspect(aspect)).filter((a) => a !== null);
 
     // Aggregate score
-    const { positive, negative, overall } = aggregateScore(scored);
+    // No rank decay and no top-N cut: the standing chart between two people is the
+    // whole set of contacts, not the loudest few on one day.
+    const { positive, negative, overall } = aggregateScore(scored, RELATIONSHIP_NEGATIVE_WEIGHT);
 
     return {
         positive,
@@ -49,7 +52,7 @@ export function calculateDailyCompatibility(
 
     const userTop = selectTopAspects(userScored);
 
-    const userTotals = aggregateScore(userTop);
+    const userTotals = aggregateScore(userTop, TRANSIT_NEGATIVE_WEIGHT, RANK_DECAY);
 
     //
     // PARTNER TRANSITS → USER NATAL
@@ -60,7 +63,7 @@ export function calculateDailyCompatibility(
 
     const partnerTop = selectTopAspects(partnerScored);
 
-    const partnerTotals = aggregateScore(partnerTop);
+    const partnerTotals = aggregateScore(partnerTop, TRANSIT_NEGATIVE_WEIGHT, RANK_DECAY);
 
     //
     // FINAL

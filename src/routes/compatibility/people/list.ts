@@ -7,8 +7,7 @@ import { z } from "zod";
 
 import { compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
-import { calculateDailyCompatibility } from "../../../modules/compatibilityPeople/aspects";
-import { normalizeScore, OVERALL_NORMALIZER } from "../../../modules/compatibilityPeople/normalizer";
+import { scoreDay } from "../../../modules/compatibilityPeople/daily";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { serializeDrizzleData } from "../../../utils/drizzleUtils";
 import { SINGS_MAP } from "../../../utils/natalUtils";
@@ -117,15 +116,12 @@ export default (async (fastify) => {
                 const missingScores = people.filter((p) => p.score === null);
 
                 for (const person of missingScores) {
-                    const dailyCompatibility = calculateDailyCompatibility(
-                        transits.planets,
-                        session.profile.birthChart,
-                        person.birthChart
-                    );
-
-                    const overallRaw = person.baseCompatibility.overall + dailyCompatibility.modifier;
-
-                    const overallScore = normalizeScore(overallRaw, OVERALL_NORMALIZER);
+                    const { compatibility: dailyCompatibility, score: overallScore } = scoreDay({
+                        readerChart: session.profile.birthChart,
+                        personChart: person.birthChart,
+                        baseOverall: person.baseCompatibility.overall,
+                        transits: transits.planets,
+                    });
 
                     await fastify.db
                         .insert(compatibilityPeopleScores)

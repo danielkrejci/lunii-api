@@ -23,6 +23,7 @@
         "format:check": "oxfmt --check",
         "prepare": "husky",
         "seed:transits": "tsx src/scripts/seedTransitsTable.ts",
+        "calibrate:compatibility": "tsx src/scripts/calibrateCompatibility.ts",
         "test:db": "RUN_DB_TESTS=1 tsx --test \"src/**/*.dbtest.ts\""
     },
     "dependencies": {
@@ -73,7 +74,6 @@
         ]
     },
     "engines": {
-        "node": "24.x",
         "pnpm": "11.x"
     },
     "packageManager": "pnpm@11.18.0"

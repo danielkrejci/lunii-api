@@ -14,7 +14,8 @@ import { db } from "../db";
 import { compatibilityPeople } from "../db/schema";
 import { computeNatalChart } from "../modules/astro";
 import { calculateCompatibility } from "../modules/compatibilityPeople/aspects";
-import { BASE_NORMALIZER, normalizeScore } from "../modules/compatibilityPeople/normalizer";
+import { BASE_NORMALIZER } from "../modules/compatibilityPeople/calibration";
+import { normalizeScore } from "../modules/compatibilityPeople/normalizer";
 import { Gender, Relationship } from "../utils/natalUtils";
 
 dayjs.extend(utc);

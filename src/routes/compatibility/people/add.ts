@@ -10,8 +10,10 @@ import { z } from "zod";
 import { compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { computeNatalChart, EphemerisError } from "../../../modules/astro";
-import { calculateCompatibility, calculateDailyCompatibility } from "../../../modules/compatibilityPeople/aspects";
-import { BASE_NORMALIZER, normalizeScore, OVERALL_NORMALIZER } from "../../../modules/compatibilityPeople/normalizer";
+import { calculateCompatibility } from "../../../modules/compatibilityPeople/aspects";
+import { BASE_NORMALIZER } from "../../../modules/compatibilityPeople/calibration";
+import { scoreDay } from "../../../modules/compatibilityPeople/daily";
+import { normalizeScore } from "../../../modules/compatibilityPeople/normalizer";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { takeUniqueOrThrow } from "../../../utils/drizzleUtils";
 import { Genders, getSunSign, Relationships, ZodiacSign } from "../../../utils/natalUtils";
@@ -143,19 +145,16 @@ export default (async (fastify) => {
                 // compute base compatibility between the person and the current user
                 const baseCompatibility = calculateCompatibility(session.profile.birthChart, birthChart);
 
-                // compute daily compatibility between the person and the current user
-                const dailyCompatibility = calculateDailyCompatibility(
-                    transits.planets,
-                    session.profile.birthChart,
-                    birthChart
-                );
+                // compute today for this pair, against their own normal
+                const { compatibility: dailyCompatibility, score: overallScore } = scoreDay({
+                    readerChart: session.profile.birthChart,
+                    personChart: birthChart,
+                    baseOverall: baseCompatibility.overall,
+                    transits: transits.planets,
+                });
 
-                // compute overall raw score
-                const overallRaw = baseCompatibility.overall + dailyCompatibility.modifier;
-
-                // compute normalized scores
+                // how compatible they are at all — a comparison against every other pair
                 const baseScore = normalizeScore(baseCompatibility.overall, BASE_NORMALIZER);
-                const overallScore = normalizeScore(overallRaw, OVERALL_NORMALIZER);
 
                 const compatibilityPersonId = await fastify.db.transaction(async (tx) => {
                     // save compatibility person to database
