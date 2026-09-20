@@ -24,15 +24,12 @@ const reader: Reader = {
     careerStage: "changing_field",
     relationshipStatus: "in_a_relationship",
     areasOfInterest: ["career", "self_development"],
-    goalsForTheYear: ["change_jobs"],
     beliefLevel: "curious_sceptic",
     contentPreference: "practical",
     personalityProfile: JSON.stringify({
-        core: "Decides slowly.",
-        emotions: "Processes by talking.",
-        expression: "Reads as confident.",
-        relationships: "Wants certainty.",
-        growth: "Avoids finishing things.",
+        yourSign: ["Your Sun is in Gemini.", "So you think out loud."],
+        yourAscendant: ["Your Ascendant is Leo.", "People meet the confident one first."],
+        inYourLife: ["Decides slowly.", "Wants certainty before moving."],
     }),
     birthChart: chart,
 };
@@ -56,7 +53,6 @@ describe("buildReaderBlock", () => {
             ...reader,
             careerStage: "",
             areasOfInterest: [],
-            goalsForTheYear: [],
         });
 
         assert.doesNotMatch(block, /none|unknown/iu);
@@ -70,11 +66,50 @@ describe("buildReaderBlock", () => {
         const block = buildReaderBlock(reader);
 
         assert.match(block, /Decides slowly\./u);
+        assert.match(block, /Wants certainty before moving\./u);
         assert.match(block, /Never quote or restate the profile/u);
     });
 
+    /**
+     * The two opening sections are sign-level and half of one explains what an Ascendant
+     * is — general where this block needs particular, and full of vocabulary every prompt
+     * reading it forbids in its own output.
+     */
+    it("leaves out the sections written about a placement", () => {
+        const block = buildReaderBlock(reader);
+
+        assert.doesNotMatch(block, /Gemini/u);
+        assert.doesNotMatch(block, /Ascendant is Leo/u);
+        // And it warns the model off the vocabulary the profile is allowed to use.
+        assert.match(block, /That vocabulary belongs to it, not to you/u);
+    });
+
+    // Paragraphs stay paragraphs: joined with a space, four of them are a wall of text.
+    it("keeps one paragraph per entry", () => {
+        const block = buildReaderBlock(reader);
+
+        assert.match(block, /Decides slowly\.\n\nWants certainty before moving\./u);
+    });
+
+    /**
+     * A reader with no birth time has no Ascendant and so gets a two-section profile. The
+     * block must not care.
+     */
+    it("reads a profile written without an Ascendant section", () => {
+        const block = buildReaderBlock({
+            ...reader,
+            personalityProfile: JSON.stringify({
+                yourSign: ["Your Sun is in Gemini."],
+                inYourLife: ["Decides slowly."],
+            }),
+        });
+
+        assert.match(block, /How they work/u);
+        assert.match(block, /Decides slowly\./u);
+    });
+
     it("drops the profile block when onboarding stored nothing usable", () => {
-        const empty = JSON.stringify({ core: "", emotions: "", expression: "", relationships: "", growth: "" });
+        const empty = JSON.stringify({ yourSign: [], yourAscendant: [], inYourLife: [] });
 
         for (const stored of [empty, "", "not json at all"]) {
             const block = buildReaderBlock({ ...reader, personalityProfile: stored });
@@ -82,6 +117,41 @@ describe("buildReaderBlock", () => {
             assert.doesNotMatch(block, /How they work/u, `expected no profile block for ${stored.slice(0, 20)}`);
             assert.match(block, /Decides by/u);
         }
+    });
+
+    /**
+     * The column round-trips through the client as an unvalidated string, so anything at
+     * all can be in it. None of these may throw.
+     */
+    it("ignores a shape it does not recognise", () => {
+        const stored = [
+            JSON.stringify({ foo: "bar" }),
+            "[]",
+            "null",
+            "42",
+            // The section as a bare string rather than the array of paragraphs it must be.
+            JSON.stringify({ yourSign: ["x"], inYourLife: "Decides slowly." }),
+            JSON.stringify({ yourSign: ["x"], inYourLife: ["", "   "] }),
+        ];
+
+        for (const profile of stored) {
+            const block = buildReaderBlock({ ...reader, personalityProfile: profile });
+
+            assert.doesNotMatch(block, /How they work/u, `expected no profile block for ${profile.slice(0, 24)}`);
+            assert.match(block, /Decides by/u);
+        }
+    });
+
+    it("keeps the paragraphs either side of an entry that is not a string", () => {
+        const block = buildReaderBlock({
+            ...reader,
+            personalityProfile: JSON.stringify({
+                yourSign: ["x"],
+                inYourLife: ["Decides slowly.", 5, "Wants certainty before moving."],
+            }),
+        });
+
+        assert.match(block, /Decides slowly\.\n\nWants certainty before moving\./u);
     });
 
     it("names only the placements today is actually touching", () => {

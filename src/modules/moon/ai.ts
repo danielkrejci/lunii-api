@@ -444,36 +444,11 @@ export async function generateMoonInsight(input: {
         error: string | null;
     };
 }> {
-    const language = getLanguageByIso(input.languageIso);
-
-    const prompt = buildPrompt({
-        variant: input.variant,
-        moon: input.moon,
-        contacts: input.contacts,
-        teaser: input.teaser,
-        language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
-        natalMoonSign: input.natalMoonSign,
-        readerBlock: buildReaderBlock(input.reader, input.contacts),
-    });
+    const { prompt, config } = buildMoonInsightRequest(input);
 
     const startedAt = Date.now();
 
-    const response = await ai.models.generateContent({
-        model: MODEL,
-        contents: prompt,
-        config: {
-            /**
-             * Thinking off. Measured on the daily prompt: the default budget spends
-             * 2 000–9 500 hidden tokens, costs 40 % more and takes 48–64 s instead of 27 s,
-             * and the only thing it bought was reaching back for the address rule buried at
-             * the end of the prompt. That rule now sits at the top as well, so there is
-             * nothing left for it to buy.
-             */
-            thinkingConfig: { thinkingBudget: 0 },
-            responseMimeType: "application/json",
-            responseJsonSchema: toResponseJsonSchema(answerSchema),
-        },
-    });
+    const response = await ai.models.generateContent({ model: MODEL, contents: prompt, config });
 
     const text = response.text ?? "";
 
@@ -502,6 +477,72 @@ export async function generateMoonInsight(input: {
         error: null as string | null,
     };
 
+    const read = readMoonInsightAnswer(text, input.contacts, response.candidates?.[0]?.finishReason);
+
+    return {
+        content: read.content,
+        usage: { ...usage, output: getLLMJson(text), error: read.error },
+    };
+}
+
+/**
+ * Everything a call needs, assembled without making one.
+ *
+ * Split out so the interactive path and the nightly batch cannot drift apart: same
+ * prompt, same generation config, and the only difference is who waits for the answer.
+ */
+export function buildMoonInsightRequest(input: {
+    variant: MoonVariant;
+    moon: MoonToday;
+    contacts: PlanetContact[];
+    teaser: MoonTeaser | null;
+    languageIso: string;
+    reader: Reader;
+    natalMoonSign: string;
+}): { prompt: string; config: Record<string, unknown> } {
+    const language = getLanguageByIso(input.languageIso);
+
+    const prompt = buildPrompt({
+        variant: input.variant,
+        moon: input.moon,
+        contacts: input.contacts,
+        teaser: input.teaser,
+        language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
+        natalMoonSign: input.natalMoonSign,
+        readerBlock: buildReaderBlock(input.reader, input.contacts),
+    });
+
+    return {
+        prompt,
+        config: {
+            /**
+             * Thinking off. Measured on the daily prompt: the default budget spends
+             * 2 000–9 500 hidden tokens, costs 40 % more and takes 48–64 s instead of 27 s,
+             * and the only thing it bought was reaching back for the address rule buried at
+             * the end of the prompt. That rule now sits at the top as well, so there is
+             * nothing left for it to buy.
+             */
+            thinkingConfig: { thinkingBudget: 0 },
+            responseMimeType: "application/json",
+            responseJsonSchema: toResponseJsonSchema(answerSchema),
+        },
+    };
+}
+
+/**
+ * Turns whatever the model said into a Moon reading, or explains why it could not.
+ *
+ * Takes the engine's contacts as well as the text, because the answer is keyed against
+ * them: a contact the model dropped or renamed still has to appear on screen.
+ *
+ * Shared with the batch, where the answer arrives hours later in a file — the checks
+ * must be the same, or a night's work could pass a bar the interactive path would fail.
+ */
+export function readMoonInsightAnswer(
+    text: string,
+    contacts: PlanetContact[],
+    finishReason?: string
+): { content: MoonInsightContent | null; error: string | null } {
     const raw = parseLLMJson<unknown>(text);
     const parsed = raw === null ? null : answerSchema.safeParse(raw);
 
@@ -516,16 +557,12 @@ export async function generateMoonInsight(input: {
 
         return {
             content: null,
-            usage: {
-                ...usage,
-                output: getLLMJson(text),
-                error: `${reason} (finishReason: ${response.candidates?.[0]?.finishReason ?? "unknown"}, ${text.length} chars)`,
-            },
+            error: `${reason} (finishReason: ${finishReason ?? "unknown"}, ${text.length} chars)`,
         };
     }
 
     return {
-        usage: { ...usage, output: getLLMJson(text) },
+        error: null,
         content: {
             insight: parsed.data.insight,
             /**
@@ -534,7 +571,7 @@ export async function generateMoonInsight(input: {
              * caption rather than disappearing from the screen.
              */
             contacts: Object.fromEntries(
-                input.contacts.map((contact) => [
+                contacts.map((contact) => [
                     contact.id,
                     {
                         id: contact.id,

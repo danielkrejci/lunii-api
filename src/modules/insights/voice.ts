@@ -83,7 +83,7 @@ for, in a conversation they keep postponing.
   you may stop waiting and just sort it out your own way"
 
 Do not invent facts about their life to get there. A situation many readers would
-recognise is specific enough; a claim about what happened to them is not allowed."
+recognise is specific enough; a claim about what happened to them is not allowed.
 
 NAME THE THING, NOT THE DATA
 

@@ -276,14 +276,26 @@ export async function generateScoresForAllUsers(db: Db, date: string): Promise<n
     return written;
 }
 
+/**
+ * How far ahead the deterministic half is kept.
+ *
+ * Two days rather than one, because pre-generation submits a batch about 48 hours before
+ * the day it writes, and the model is given the scores for that day. Computing them is
+ * free and idempotent — `onConflictDoNothing` — so reaching further costs a few
+ * thousand rows and buys the batch its head start.
+ */
+const SCORE_DAYS_AHEAD = 2;
+
 export async function executeDailyScoresGeneration(db: Db): Promise<void> {
-    const date = dayjs.utc().startOf("day").add(1, "day").format("YYYY-MM-DD");
+    for (let offset = 1; offset <= SCORE_DAYS_AHEAD; offset++) {
+        const date = dayjs.utc().startOf("day").add(offset, "day").format("YYYY-MM-DD");
 
-    console.log("[CRON] Generating daily scores for", date);
+        console.log("[CRON] Generating daily scores for", date);
 
-    const count = await generateScoresForAllUsers(db, date);
+        const count = await generateScoresForAllUsers(db, date);
 
-    console.log("[CRON] Done, wrote", count);
+        console.log("[CRON] Done, wrote", count);
+    }
 }
 
 /**

@@ -7,7 +7,7 @@ import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { aiGenerations, dailyInsights, moonInsights, profile as profileTable } from "../../db/schema";
+import { aiGenerations, moonInsights, profile as profileTable } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { MOON_PHASES, TransitChart } from "../../modules/astro";
 import { creditKeys } from "../../modules/credits/keys";
@@ -16,6 +16,8 @@ import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyS
 import { getOrCreateTransits, scoreProfileForDate } from "../../modules/dailyScore/service";
 import { DailyScoreResult, PlanetContact } from "../../modules/dailyScore/types";
 import { GenerationStatus } from "../../modules/insights";
+import { awaitDailyContent } from "../../modules/insights/awaitDailyContent";
+import { startDailyInsightGeneration } from "../../modules/insights/generateDaily";
 import { generateMoonInsight, MoonInsightContent, MoonTeaser } from "../../modules/moon/ai";
 import { describeMoonDay, MOON_VARIANTS, MoonToday } from "../../modules/moon/today";
 import { SINGS_MAP } from "../../utils/natalUtils";
@@ -200,23 +202,39 @@ async function generate(
         const contacts = lunarContacts(scoreProfileForDate(input.profile, transitData.planets));
 
         /**
-         * Best-effort continuity with the horoscope the reader may already have seen.
-         * The daily insight has its own lifecycle and may be pending, failed or absent —
-         * this must never wait for it, so a missing teaser simply drops the block from
-         * the prompt.
+         * Continuity with the horoscope the reader has open, waited for while it is still
+         * being written.
+         *
+         * The Moon can be opened straight from home, on the same tick the horoscope
+         * starts, so without the wait the teaser would be missing exactly when the two
+         * texts sit closest together. `awaitDailyContent` waits only on `pending` and
+         * gives up on a failure or a timeout, so a broken horoscope still cannot freeze
+         * this panel — it just writes standalone.
          */
-        const daily = await fastify.db.query.dailyInsights.findFirst({
-            columns: { content: true },
-            where: and(eq(dailyInsights.userId, userId), eq(dailyInsights.date, date)),
+        const dailyContent = await awaitDailyContent(fastify.db, {
+            userId,
+            date,
+            /**
+             * When nothing is writing the horoscope, ask for it. Writing it costs the
+             * reader nothing, and the alternative is this panel quoting a day that was
+             * never written.
+             */
+            start: () =>
+                startDailyInsightGeneration(fastify, {
+                    userId,
+                    profile: input.profile,
+                    date,
+                    allowFailed: true,
+                }),
         });
 
-        const teaser: MoonTeaser | null = daily?.content
+        const teaser: MoonTeaser | null = dailyContent
             ? {
-                  ...daily.content.moon,
+                  ...dailyContent.moon,
                   // What the horoscope already proposed for the day as a whole, so the
                   // Moon screen narrows it rather than repeating or contradicting it.
-                  opportunities: daily.content.opportunity?.examples,
-                  watchOuts: daily.content.watchOut?.examples,
+                  opportunities: dailyContent.opportunity?.examples,
+                  watchOuts: dailyContent.watchOut?.examples,
               }
             : null;
 

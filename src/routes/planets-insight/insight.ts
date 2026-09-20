@@ -7,7 +7,7 @@ import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { aiGenerations, dailyInsights, planetInsights, profile as profileTable } from "../../db/schema";
+import { aiGenerations, planetInsights, profile as profileTable } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { PLANETS } from "../../modules/astro";
 import { creditKeys } from "../../modules/credits/keys";
@@ -15,6 +15,8 @@ import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../modu
 import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyScore";
 import { getOrCreateTransits, scoreProfileForDate } from "../../modules/dailyScore/service";
 import { GenerationStatus } from "../../modules/insights";
+import { awaitDailyContent } from "../../modules/insights/awaitDailyContent";
+import { startDailyInsightGeneration } from "../../modules/insights/generateDaily";
 import { DailyTeaser, generatePlanetInsights, PlanetInsightContent } from "../../modules/insights/planets";
 import { accessSchema, errorSchema, insufficientCreditsSchema } from "../../utils/zodResponse";
 
@@ -166,22 +168,38 @@ async function generate(
         const score = scoreProfileForDate(input.profile, transitData.planets);
 
         /**
-         * Best-effort continuity with the horoscope the reader has open. The panel renders
-         * from the deterministic half immediately, so a planet can be tapped while the
-         * horoscope is still generating — this must never wait for it, so a missing
-         * horoscope simply drops the block from the prompt.
+         * Continuity with the horoscope the reader has open, waited for while it is still
+         * being written.
+         *
+         * In practice a planet is only reachable from an unlocked horoscope, so the wait
+         * rarely has anything to do — but it costs nothing when the text is already there
+         * and it keeps this path honest when the panel is reached any other way.
+         * `awaitDailyContent` gives up on a failure or a timeout, so the panel is never
+         * held hostage to a horoscope that is not coming.
          */
-        const daily = await fastify.db.query.dailyInsights.findFirst({
-            columns: { content: true },
-            where: and(eq(dailyInsights.userId, userId), eq(dailyInsights.date, date)),
+        const dailyContent = await awaitDailyContent(fastify.db, {
+            userId,
+            date,
+            /**
+             * When nothing is writing the horoscope, ask for it. Writing it costs the
+             * reader nothing, and the alternative is this panel quoting a day that was
+             * never written.
+             */
+            start: () =>
+                startDailyInsightGeneration(fastify, {
+                    userId,
+                    profile: input.profile,
+                    date,
+                    allowFailed: true,
+                }),
         });
 
-        const teaser: DailyTeaser | null = daily?.content
+        const teaser: DailyTeaser | null = dailyContent
             ? {
-                  overview: daily.content.overview,
-                  deepInsight: daily.content.deepInsight,
-                  opportunity: daily.content.opportunity,
-                  watchOut: daily.content.watchOut,
+                  overview: dailyContent.overview,
+                  deepInsight: dailyContent.deepInsight,
+                  opportunity: dailyContent.opportunity,
+                  watchOut: dailyContent.watchOut,
               }
             : null;
 

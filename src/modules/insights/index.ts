@@ -1447,7 +1447,18 @@ export interface DailyInsightContent {
     >;
 }
 
-export type GenerationStatus = "absent" | "pending" | "ready" | "failed";
+/**
+ * Where a piece of written content is in its life.
+ *
+ * `queued` is the one that needs explaining: it means the request is sitting in a Gemini
+ * batch, which runs for hours rather than the half minute an interactive call takes.
+ * It is deliberately not `pending`, because two things key off that distinction — the
+ * stuck-generation sweeper fails anything `pending` for more than five minutes and would
+ * otherwise reap a batch mid-flight, and the on-demand claim only takes `absent` or
+ * stale `pending` rows, so a queued day cannot also be generated interactively and paid
+ * for twice.
+ */
+export type GenerationStatus = "absent" | "pending" | "queued" | "ready" | "failed";
 
 /**
  * One contact's text, in the user's language.
@@ -1483,6 +1494,9 @@ export interface DailyPlanetInsight {
 }
 
 const MODEL = "gemini-2.5-flash";
+
+/** Exported so the nightly batch submits against the very same model the app answers with. */
+export const DAILY_INSIGHT_MODEL = MODEL;
 
 const wordingSchema = z.object({
     insight: z.string(),
@@ -1553,38 +1567,11 @@ export async function generateDailyInsight(input: {
         error: string | null;
     };
 }> {
-    const analysis = analyzeTransits(input.transits);
-
-    const language = getLanguageByIso(input.languageIso);
-
-    const prompt = buildPrompt({
-        analysis,
-        score: input.score,
-        birthChart: input.reader.birthChart,
-        // Built from the day's strongest impacts, so the placements it names are the ones
-        // today is actually landing on rather than the whole chart.
-        readerBlock: buildReaderBlock(input.reader, input.score.breakdown.top),
-        language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
-    });
+    const { prompt, config } = buildDailyInsightRequest(input);
 
     const startedAt = Date.now();
 
-    const response = await ai.models.generateContent({
-        model: MODEL,
-        contents: prompt,
-        config: {
-            /**
-             * Thinking off. Measured on the daily prompt: the default budget spends
-             * 2 000–9 500 hidden tokens, costs 40 % more and takes 48–64 s instead of 27 s,
-             * and the only thing it bought was reaching back for the address rule buried at
-             * the end of the prompt. That rule now sits at the top as well, so there is
-             * nothing left for it to buy.
-             */
-            thinkingConfig: { thinkingBudget: 0 },
-            responseMimeType: "application/json",
-            responseJsonSchema: toResponseJsonSchema(answerSchema),
-        },
-    });
+    const response = await ai.models.generateContent({ model: MODEL, contents: prompt, config });
 
     const text = response.text ?? "";
 
@@ -1613,6 +1600,69 @@ export async function generateDailyInsight(input: {
         error: null as string | null,
     };
 
+    const read = readDailyInsightAnswer(text, response.candidates?.[0]?.finishReason);
+
+    return {
+        content: read.content,
+        usage: { ...usage, output: getLLMJson(text), error: read.error },
+    };
+}
+
+/**
+ * Everything a call needs, assembled without making one.
+ *
+ * Split out so the interactive path and the nightly batch cannot drift apart: they are
+ * the same prompt and the same generation config, and the only difference between them
+ * is who is waiting for the answer.
+ */
+export function buildDailyInsightRequest(input: {
+    transits: DailyTransits;
+    score: DailyScoreResult;
+    reader: Reader;
+    languageIso: string;
+}): { prompt: string; config: Record<string, unknown> } {
+    const analysis = analyzeTransits(input.transits);
+
+    const language = getLanguageByIso(input.languageIso);
+
+    const prompt = buildPrompt({
+        analysis,
+        score: input.score,
+        birthChart: input.reader.birthChart,
+        // Built from the day's strongest impacts, so the placements it names are the ones
+        // today is actually landing on rather than the whole chart.
+        readerBlock: buildReaderBlock(input.reader, input.score.breakdown.top),
+        language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
+    });
+
+    return {
+        prompt,
+        config: {
+            /**
+             * Thinking off. Measured on the daily prompt: the default budget spends
+             * 2 000–9 500 hidden tokens, costs 40 % more and takes 48–64 s instead of 27 s,
+             * and the only thing it bought was reaching back for the address rule buried at
+             * the end of the prompt. That rule now sits at the top as well, so there is
+             * nothing left for it to buy.
+             */
+            thinkingConfig: { thinkingBudget: 0 },
+            responseMimeType: "application/json",
+            responseJsonSchema: toResponseJsonSchema(answerSchema),
+        },
+    };
+}
+
+/**
+ * Turns whatever the model said into a horoscope, or explains why it could not.
+ *
+ * Also shared with the batch, where the answer arrives hours later in a file rather than
+ * as a reply — the text is the same shape and so the checks must be the same, or a day
+ * written overnight could pass a bar the interactive path would have failed.
+ */
+export function readDailyInsightAnswer(
+    text: string,
+    finishReason?: string
+): { content: DailyInsightContent | null; error: string | null } {
     const raw = parseLLMJson<unknown>(text);
     const parsed = raw === null ? null : answerSchema.safeParse(raw);
 
@@ -1632,18 +1682,14 @@ export async function generateDailyInsight(input: {
 
         return {
             content: null,
-            usage: {
-                ...usage,
-                output: getLLMJson(text),
-                error: `${reason} (finishReason: ${response.candidates?.[0]?.finishReason ?? "unknown"}, ${text.length} chars)`,
-            },
+            error: `${reason} (finishReason: ${finishReason ?? "unknown"}, ${text.length} chars)`,
         };
     }
 
     const result = parsed.data;
 
     return {
-        usage: { ...usage, output: getLLMJson(text) },
+        error: null,
         content: {
             overview: result.overview,
             // Trimmed and emptied out here so no screen has to defend against a blank

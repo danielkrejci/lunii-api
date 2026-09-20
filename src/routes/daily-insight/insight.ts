@@ -2,16 +2,17 @@ import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
-import { and, asc, between, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, between, eq } from "drizzle-orm";
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { aiGenerations, dailyInsights, profile as profileTable } from "../../db/schema";
+import { dailyInsights } from "../../db/schema";
 import { auth } from "../../lib/auth";
+import { touchLastActive } from "../../modules/activity";
 import { MOON_PHASES, PLANETS } from "../../modules/astro";
 import { creditKeys } from "../../modules/credits/keys";
-import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../modules/credits/service";
+import { AccessState, checkAccess, spendCredits } from "../../modules/credits/service";
 import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyScore";
 import {
     backfillScoresForUser,
@@ -20,7 +21,8 @@ import {
     ScoringProfile,
     scoreProfileForDate,
 } from "../../modules/dailyScore/service";
-import { DailyInsightContent, DailyTransits, generateDailyInsight, GenerationStatus } from "../../modules/insights";
+import { DailyInsightContent, GenerationStatus } from "../../modules/insights";
+import { startDailyInsightGeneration } from "../../modules/insights/generateDaily";
 import { elongation, moonIllumination } from "../../modules/moon";
 import { getMoonPhase } from "../../modules/transits";
 import { serializeDrizzleData } from "../../utils/drizzleUtils";
@@ -95,20 +97,29 @@ const responseSchema = z.object({
         access: accessSchema,
         content: z.discriminatedUnion("status", [
             /**
-             * Nobody has paid for this day yet. Everything above is still here — the
-             * scores, the timeline, the planets — because only the written half costs
-             * anything, and a locked screen that still shows the day's numbers is a
-             * better argument for unlocking it than an empty one.
+             * Written, but not paid for yet. Everything above is still here — the scores,
+             * the timeline, the planets — and so is `preview`, because the offer is the
+             * horoscope's own opening rather than a description of it.
+             *
+             * The day is generated before anyone pays, so this state means the text
+             * exists and is being held back, never that nothing has been written.
              */
-            z.object({ status: z.literal("locked"), data: z.null(), error: z.null() }),
-            z.object({ status: z.literal("pending"), data: z.null(), error: z.null() }),
+            z.object({
+                status: z.literal("locked"),
+                data: z.null(),
+                preview: z.object({ overview: z.object({ title: z.string(), description: z.string() }) }),
+                error: z.null(),
+            }),
+            z.object({ status: z.literal("pending"), data: z.null(), preview: z.null(), error: z.null() }),
             z.object({
                 status: z.literal("failed"),
                 data: z.null(),
+                preview: z.null(),
                 error: z.object({ code: z.string(), message: z.string() }),
             }),
             z.object({
                 status: z.literal("ready"),
+                preview: z.null(),
                 data: z.object({
                     overview: z.object({ title: z.string(), description: z.string() }),
                     /** Paragraphs. Split on the server so no screen has to parse "\n". */
@@ -132,157 +143,6 @@ const responseSchema = z.object({
 });
 
 type ResponseData = z.infer<typeof responseSchema>["data"];
-
-/**
- * Claims the day and, if the claim succeeds, writes the horoscope. Runs detached from
- * the request that started it: the model needs 30–60 seconds and no client should hold
- * a connection open that long.
- *
- * The claim is a single statement on purpose — a SELECT followed by an UPDATE would let
- * two concurrent requests both start a paid generation. It fires when the day has no
- * content and nothing else owns it: never generated (`absent`), previously failed but
- * only for an explicit retry, or claimed by a run that has since died and left its
- * `pending` older than the timeout.
- */
-async function generate(
-    fastify: FastifyInstance,
-    input: {
-        userId: string;
-        /** The whole stored profile: scoring needs the chart, the prompt needs the rest. */
-        profile: typeof profileTable.$inferSelect;
-        date: string;
-        allowFailed: boolean;
-    }
-): Promise<void> {
-    const { userId, date } = input;
-
-    const [claimed] = await fastify.db
-        .update(dailyInsights)
-        /**
-         * Truncated to milliseconds because the claim timestamp has to survive a round
-         * trip through a JS `Date`, which has no microseconds. Full `now()` precision
-         * would come back short and the write below would match no row at all.
-         */
-        .set({ status: "pending", updatedAt: sql`date_trunc('milliseconds', now())` })
-        .where(
-            and(
-                eq(dailyInsights.userId, userId),
-                eq(dailyInsights.date, date),
-                isNull(dailyInsights.content),
-                or(
-                    eq(dailyInsights.status, "absent"),
-                    input.allowFailed ? eq(dailyInsights.status, "failed") : sql`false`,
-                    and(
-                        eq(dailyInsights.status, "pending"),
-                        lt(dailyInsights.updatedAt, sql`now() - interval '5 minutes'`)
-                    )
-                )
-            )
-        )
-        .returning({ updatedAt: dailyInsights.updatedAt });
-
-    if (!claimed) {
-        return;
-    }
-
-    /**
-     * The claim is awaited so the caller can answer with the state it just created; the
-     * model itself is not, because it needs 30–60 seconds and no request may hold a
-     * connection open that long. Every write below carries the claimed timestamp: a run
-     * whose row has been touched since (a language change, or a timeout and a new claim)
-     * must not overwrite what replaced it.
-     */
-    void (async () => {
-        const owned = and(
-            eq(dailyInsights.userId, userId),
-            eq(dailyInsights.date, date),
-            eq(dailyInsights.updatedAt, claimed.updatedAt)
-        );
-
-        const transitData = await getOrCreateTransits(fastify.db, date, input.profile.timezone);
-        const score = scoreProfileForDate(input.profile, transitData.planets);
-
-        // One retry, because most failures here are a timeout or a rate limit rather
-        // than anything a second attempt would hit again.
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            const { content, usage } = await generateDailyInsight({
-                transits: {
-                    planets: transitData.planets as DailyTransits["planets"],
-                    aspects: transitData.aspects as DailyTransits["aspects"],
-                },
-                score,
-                // The stored row satisfies Reader structurally, so nothing has to be
-                // picked apart here and forgotten when a field is added.
-                reader: input.profile,
-                languageIso: input.profile.language,
-            });
-
-            // The audit row is the only place the prompt, the answer and the price
-            // survive, and it must never be the reason a finished horoscope is lost.
-            await fastify.db
-                .insert(aiGenerations)
-                .values({
-                    userId,
-                    type: "dailyInsight",
-                    status: content ? "success" : "error",
-                    error: usage.error,
-                    requestId: usage.requestId,
-                    provider: usage.provider,
-                    model: usage.model,
-                    input: usage.input,
-                    output: usage.output,
-                    inputTokens: usage.inputTokens,
-                    outputTokens: usage.outputTokens,
-                    total_tokens: usage.totalTokens,
-                    latencyMs: usage.latencyMs,
-                    cost: usage.cost,
-                })
-                .catch((error: unknown) =>
-                    fastify.log.error({ err: error, userId, date }, "Failed to log AI generation")
-                );
-
-            if (content) {
-                const written = await fastify.db
-                    .update(dailyInsights)
-                    .set({ content, status: "ready", updatedAt: sql`date_trunc('milliseconds', now())` })
-                    .where(owned)
-                    .returning({ date: dailyInsights.date });
-
-                // Nothing matched: the row moved on while the model was writing. Worth
-                // saying out loud — the horoscope was paid for and then thrown away.
-                if (written.length === 0) {
-                    fastify.log.warn({ userId, date }, "Generated insight discarded, the row had moved on");
-                }
-
-                return;
-            }
-        }
-
-        const failed = await fastify.db
-            .update(dailyInsights)
-            .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
-            .where(owned)
-            .returning({ date: dailyInsights.date });
-
-        /**
-         * Give the credits back, and revoke the unlock with them.
-         *
-         * Guarded on the update having matched, so only the run that actually owned this
-         * row refunds — the sweeper racing the same failure finds nothing to give back,
-         * because `refundUnlock` deletes and returns exactly once.
-         *
-         * Revoking is safe against this run's own late writes: every one of them carries
-         * the claimed timestamp, and the update above has already moved it.
-         */
-        if (failed.length > 0) {
-            await refundUnlock(fastify.db, {
-                userId,
-                feature: "dailyInsight",
-                resourceKey: creditKeys.dailyInsight(date),
-            }).catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Failed to refund credits"));
-        }
-    })().catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Generation crashed"));
-}
 
 async function buildResponse(
     db: FastifyInstance["db"],
@@ -371,37 +231,46 @@ async function buildResponse(
 /**
  * How the written half is reported.
  *
- * Order matters. A day already written is `ready` whatever the wallet says — it was
- * paid for once and stays bought. After that, an unowned day is `locked`, and it is
- * checked before `failed` on purpose: a generation that failed was refunded and its
- * unlock revoked, so reporting the stale failure underneath would offer a retry that
- * silently costs money.
+ * Writing and paying are two separate things now: the day is generated for everyone who
+ * opens the app, and credits buy the reveal of a text that already exists. So the wallet
+ * is consulted only once there is something to withhold — a day nobody has written yet
+ * is `pending` for payer and non-payer alike.
  *
- * `absent` never reaches the client. The read claims the generation for anyone entitled
- * to it, so the state where a day exists but nothing is happening to it does not need a
- * name out here.
+ * `locked` therefore always carries a preview. It can never mean "nothing has been
+ * written", which is why the old ordering against `failed` is gone: a failed day is
+ * reported as failed, and retrying it costs nothing.
+ *
+ * `absent` never reaches the client. The read claims the generation for everyone, so the
+ * state where a day exists but nothing is happening to it does not need a name out here.
  */
 function describeContent(
     stored: { content: DailyInsightContent | null; status: GenerationStatus } | undefined,
     access: AccessState
 ): ResponseData["content"] {
     if (stored?.status === "ready" && stored.content) {
-        return { status: "ready", data: stored.content, error: null };
-    }
+        if (access.unlocked) {
+            return { status: "ready", data: stored.content, preview: null, error: null };
+        }
 
-    if (!access.unlocked) {
-        return { status: "locked", data: null, error: null };
+        // The opening of the horoscope itself, rather than a description of it.
+        return {
+            status: "locked",
+            data: null,
+            preview: { overview: stored.content.overview },
+            error: null,
+        };
     }
 
     if (stored?.status === "failed") {
         return {
             status: "failed",
             data: null,
+            preview: null,
             error: { code: "generation_failed", message: "Generating today's reading failed." },
         };
     }
 
-    return { status: "pending", data: null, error: null };
+    return { status: "pending", data: null, preview: null, error: null };
 }
 
 export default (async (fastify) => {
@@ -480,6 +349,14 @@ export default (async (fastify) => {
             try {
                 const date = dayjs.utc(request.query.date).format("YYYY-MM-DD");
 
+                /**
+                 * The app opening, as far as anything on the server can see it: this read
+                 * is what the signed-in layout fires on every launch, whichever tab the
+                 * reader lands on. Throttled to an hour inside, so the five-second poll on
+                 * a pending day does not write anything.
+                 */
+                void touchLastActive(fastify.db, session.user.id);
+
                 const access = await checkAccess(fastify.db, {
                     userId: session.user.id,
                     feature: "dailyInsight",
@@ -495,10 +372,10 @@ export default (async (fastify) => {
 
                 /**
                  * The one side effect of this route: the first read of a day starts the
-                 * horoscope — but only for a reader who has already paid for it, or who
-                 * is subscribed. Everyone else is told `locked` and the generation waits
-                 * for the unlock, because a read must never spend credits: the client
-                 * polls this endpoint every five seconds while a day is pending.
+                 * horoscope, for everyone. Writing it costs us tokens but costs the reader
+                 * nothing — credits buy the reveal, not the generation — so there is no
+                 * wallet to consult here and no reason to make a reader wait for a text
+                 * they have not decided to buy yet.
                  *
                  * Reads after that change nothing — the claim only fires while the day
                  * has no content and no live run, and a failed one is left for the retry.
@@ -507,8 +384,8 @@ export default (async (fastify) => {
                  * row exists; a day with no content is reported as `pending` either way,
                  * so the answer is already the one this claim is about to make true.
                  */
-                if (access.unlocked && !data.content.data) {
-                    await generate(fastify, {
+                if (!data.content.data && data.content.status !== "locked") {
+                    await startDailyInsightGeneration(fastify, {
                         userId: session.user.id,
                         profile: session.profile,
                         date,
@@ -534,16 +411,16 @@ export default (async (fastify) => {
     );
 
     /* ============================================================
-       GENERATE — costs an AI request, so it is explicit
+       GENERATE — a retry. Costs us an AI request, the reader nothing.
     ============================================================ */
 
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/insight/generate",
         {
             /**
-             * The only endpoint that spends money on demand, and there is no attempts
-             * counter behind it. Three an hour covers a real failure the user wants to
-             * retry, and stops a stuck day from being retried into a bill.
+             * Free to the reader but not to us, which is why the limit stays. Three an
+             * hour covers a real failure someone wants to retry and stops a stuck day
+             * from being retried into a bill of our own.
              */
             config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
             schema: {
@@ -554,6 +431,94 @@ export default (async (fastify) => {
                 }),
                 response: {
                     202: responseSchema,
+                    401: errorSchema,
+                    409: errorSchema,
+                    500: errorSchema,
+                },
+            },
+        },
+        async (request, reply) => {
+            const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+
+            if (!session) {
+                return reply.status(401).send({
+                    error: { code: "unauthorized", message: "User must be logged in to access this resource." },
+                });
+            }
+
+            if (!session.profile) {
+                return reply.status(409).send({
+                    error: { code: "profile_required", message: "User must complete onboarding first." },
+                });
+            }
+
+            try {
+                const date = dayjs.utc(request.body.date).format("YYYY-MM-DD");
+
+                /**
+                 * Retry after a failure — the one path allowed to claim a `failed` day.
+                 * Claimed before the response is built, so the client is told `pending`
+                 * and starts polling instead of reading back the failure it just retried.
+                 *
+                 * No wallet here any more. Writing the day is ours to pay for; the reader
+                 * pays at `/insight/unlock`, and only for a day that already exists.
+                 */
+                await startDailyInsightGeneration(fastify, {
+                    userId: session.user.id,
+                    profile: session.profile,
+                    date,
+                    allowFailed: true,
+                });
+
+                const data = await buildResponse(fastify.db, {
+                    userId: session.user.id,
+                    profile: session.profile,
+                    date,
+                    access: await checkAccess(fastify.db, {
+                        userId: session.user.id,
+                        feature: "dailyInsight",
+                        resourceKey: creditKeys.dailyInsight(date),
+                    }),
+                });
+
+                return reply.status(202).send({ data });
+            } catch (error: unknown) {
+                const isDev = process.env.NODE_ENV !== "production";
+
+                request.log.error({ err: error }, "Failed to generate daily insight");
+
+                return reply.status(500).send({
+                    error: {
+                        code: "error",
+                        message:
+                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
+                    },
+                });
+            }
+        }
+    );
+
+    /* ============================================================
+       UNLOCK — the only endpoint that spends credits
+    ============================================================ */
+
+    fastify.withTypeProvider<ZodTypeProvider>().post(
+        "/insight/unlock",
+        {
+            /**
+             * No rate limit. `spendCredits` is idempotent on `(user, feature, date)`, so a
+             * second call is a no-op that charges nothing — and the client fires this the
+             * moment a detail screen opens, which a limit would turn into a 429 on an
+             * ordinary back-and-forth between two screens.
+             */
+            schema: {
+                body: z.object({
+                    date: z.string().refine((val) => dayjs.utc(val).isValid(), {
+                        message: "Invalid date format",
+                    }),
+                }),
+                response: {
+                    200: responseSchema,
                     401: errorSchema,
                     402: insufficientCreditsSchema,
                     409: errorSchema,
@@ -580,13 +545,10 @@ export default (async (fastify) => {
                 const date = dayjs.utc(request.body.date).format("YYYY-MM-DD");
 
                 /**
-                 * The purchase. This endpoint is both the unlock and the retry, and the
-                 * unlock row is what tells them apart: a reader who already owns the day
-                 * is charged nothing, so retrying a generation they paid for is free.
-                 *
-                 * A failed generation refunds and revokes, so a retry after that pays
-                 * again — but the reader was made whole first, and is never left without
-                 * both the credits and the horoscope.
+                 * The purchase, and nothing else — generation is not this endpoint's
+                 * business. The unlock row is the mutual exclusion: opening the same day
+                 * twice inserts once, so the second call comes back `already_unlocked`
+                 * with a cost of zero and the reader is charged exactly once.
                  */
                 const spend = await spendCredits(fastify.db, {
                     userId: session.user.id,
@@ -611,17 +573,11 @@ export default (async (fastify) => {
                 }
 
                 /**
-                 * Retry after a failure — the one path allowed to claim a `failed` day.
-                 * Claimed before the response is built, so the client is told `pending`
-                 * and starts polling instead of reading back the failure it just retried.
+                 * Normally the day is already written and this response carries it whole.
+                 * When it is not — an unlock that raced the generation — the claim below
+                 * makes sure something is working on it rather than leaving the reader
+                 * paid up in front of a day nobody is writing.
                  */
-                await generate(fastify, {
-                    userId: session.user.id,
-                    profile: session.profile,
-                    date,
-                    allowFailed: true,
-                });
-
                 const data = await buildResponse(fastify.db, {
                     userId: session.user.id,
                     profile: session.profile,
@@ -633,11 +589,20 @@ export default (async (fastify) => {
                     }),
                 });
 
-                return reply.status(202).send({ data });
+                if (!data.content.data) {
+                    await startDailyInsightGeneration(fastify, {
+                        userId: session.user.id,
+                        profile: session.profile,
+                        date,
+                        allowFailed: false,
+                    });
+                }
+
+                return reply.status(200).send({ data });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 
-                request.log.error({ err: error }, "Failed to generate daily insight");
+                request.log.error({ err: error }, "Failed to unlock daily insight");
 
                 return reply.status(500).send({
                     error: {

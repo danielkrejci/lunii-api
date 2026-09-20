@@ -32,6 +32,7 @@ import {
     createStuckGenerationsJob,
     executeDailyScoresGeneration,
 } from "./modules/dailyScore/service";
+import { createBatchCollectJob, createBatchCutoffJob, createDailyInsightBatchJob } from "./modules/generation/jobs";
 import { createTransitJob, executeTransitsGeneration } from "./modules/transits";
 
 dayjs.extend(utc);
@@ -163,6 +164,16 @@ fastify.ready(async (err) => {
     fastify.scheduler.addCronJob(job);
     fastify.scheduler.addCronJob(createDailyScoresJob(fastify.db));
     fastify.scheduler.addCronJob(createStuckGenerationsJob(fastify.db));
+
+    /*
+     * Pre-generation of the horoscope: submit two days ahead, collect whatever Gemini
+     * has finished, and close the run six hours before the day begins anywhere. Separate
+     * jobs rather than one, because they run on completely different cadences and a
+     * failure in any of them must not stop the others.
+     */
+    fastify.scheduler.addCronJob(createDailyInsightBatchJob(fastify));
+    fastify.scheduler.addCronJob(createBatchCollectJob(fastify));
+    fastify.scheduler.addCronJob(createBatchCutoffJob(fastify));
 
     // immediate run: transits first, then tomorrow's scores for everyone
     await executeTransitsGeneration(fastify.db);

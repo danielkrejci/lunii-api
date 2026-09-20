@@ -16,10 +16,9 @@ export interface Reader {
     careerStage: string;
     relationshipStatus: string;
     areasOfInterest: string[];
-    goalsForTheYear: string[];
     beliefLevel: string;
     contentPreference: string;
-    /** The five-section profile written at onboarding, as the JSON string it is stored as. */
+    /** The profile written at onboarding, as the JSON string it is stored as. */
     personalityProfile: string;
     birthChart: NatalChart;
 }
@@ -35,44 +34,62 @@ export interface TouchedPoint {
     natal: NatalPoint;
 }
 
-/** The five sections written at onboarding. Mirrors the personality-profile route. */
-interface PersonalityProfileText {
-    core: string;
-    emotions: string;
-    expression: string;
-    relationships: string;
-    growth: string;
-}
+/**
+ * The one section of the profile a prompt should carry.
+ *
+ * Not the other two. The onboarding profile now opens with a section about the reader's
+ * Sun sign and one about their Ascendant, and both are deliberately sign-level — half of
+ * the second is spent explaining what an Ascendant even is. That is general where this
+ * block needs particular: everyone born that month gets the same paragraph, and general
+ * material here makes the horoscope reading it more generic, not less.
+ *
+ * They also name placements outright, which every prompt reading this block forbids in its
+ * own output. Vocabulary sitting in the context is the cheapest way to have it echoed.
+ *
+ * This section is the one written about the person rather than about a placement.
+ */
+const USED_SECTION = "inYourLife";
 
 /**
- * The stored profile, or null.
+ * The stored profile, as the paragraphs a prompt should carry.
  *
- * Null covers three real cases and treats them alike: onboarding that failed and stored
- * five empty strings, a row written before the column meant this, and a client that put
- * something else there — the column round-trips through the client as an unvalidated
- * string. A block that says "not available" is worse than no block, so the caller drops
- * it entirely.
+ * Paragraphs rather than a shape on purpose: the caller's job — join what is worth quoting
+ * into one run of prose — does not depend on how the profile is sectioned, and keeping
+ * every shape question inside this function is what makes the next change to the profile a
+ * change to one place. It has been restructured three times; the caller has not moved.
+ *
+ * An empty array covers the real cases and treats them alike: onboarding that failed and
+ * stored empty strings, a row written before the column meant this, a shape nobody
+ * recognises, and a client that put something else there — the column round-trips through
+ * the client as an unvalidated string. A block that says "not available" is worse than no
+ * block, so the caller drops it entirely.
  */
-function readPersonality(stored: string): PersonalityProfileText | null {
+function readPersonality(stored: string): string[] {
     // Checked before parsing rather than after: `parseLLMJson` reports a failure to the
     // console, and an unfinished onboarding is an ordinary state, not an incident.
     if (!stored.trim()) {
-        return null;
+        return [];
     }
 
-    const parsed = parseLLMJson<Partial<PersonalityProfileText>>(stored);
+    const parsed = parseLLMJson<Record<string, unknown>>(stored);
 
-    if (!parsed) {
-        return null;
+    // Arrays and scalars reach here too — `parseLLMJson` returns whatever parsed.
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return [];
     }
 
-    const sections = [parsed.core, parsed.emotions, parsed.expression, parsed.relationships, parsed.growth];
+    const section = parsed[USED_SECTION];
 
-    if (sections.some((section) => typeof section !== "string") || sections.every((section) => !section?.trim())) {
-        return null;
+    if (!Array.isArray(section)) {
+        return [];
     }
 
-    return parsed as PersonalityProfileText;
+    // Per entry rather than all-or-nothing: one non-string in the array is not a reason to
+    // throw away the paragraphs either side of it.
+    return section
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean);
 }
 
 /**
@@ -139,20 +156,17 @@ export function buildReaderBlock(reader: Reader, contacts: TouchedPoint[] = []):
     add("Career right now", humanizeEnum(reader.careerStage));
     add("Relationship", humanizeEnum(reader.relationshipStatus));
     add("Cares about", humanizeEnums(reader.areasOfInterest).join(", "));
-    add("Working towards this year", humanizeEnums(reader.goalsForTheYear).join(", "));
 
     const personality = readPersonality(reader.personalityProfile);
 
-    const personalityBlock = personality
-        ? `
+    const personalityBlock =
+        personality.length > 0
+            ? `
 
 How they work, from the profile they were given when they joined:
 
-${[personality.core, personality.emotions, personality.relationships, personality.growth]
-    .map((section) => section.trim())
-    .filter(Boolean)
-    .join(" ")}`
-        : "";
+${personality.join("\n\n")}`
+            : "";
 
     const placements = describeTouchedPlacements(reader.birthChart, contacts);
 
@@ -198,5 +212,8 @@ is wrong — it labels them instead of interpreting for them. The same goes for 
 relationship status and their career.
 
 Never quote or restate the profile above. They have already read it: it is the mechanism
-behind what you write, never the subject of it.${registerLine}`;
+behind what you write, never the subject of it.
+
+It was written at signup, where naming the astrology is allowed, so it may name signs,
+planets and the Ascendant. You may not. That vocabulary belongs to it, not to you.${registerLine}`;
 }

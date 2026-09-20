@@ -1,7 +1,8 @@
 import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
-import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
+import utc from "dayjs/plugin/utc.js";
+import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
@@ -14,10 +15,16 @@ import { CONTACT_SIDES, dailyContacts } from "../../../modules/compatibilityPeop
 import { scoreDay } from "../../../modules/compatibilityPeople/daily";
 import { creditKeys } from "../../../modules/credits/keys";
 import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../../modules/credits/service";
-import { getOrCreateTransits } from "../../../modules/dailyScore/service";
+import { datesAround, getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { serializeDrizzleData } from "../../../utils/drizzleUtils";
 import { Genders, Relationships, SINGS_MAP } from "../../../utils/natalUtils";
 import { accessSchema, errorSchema, insufficientCreditsSchema } from "../../../utils/zodResponse";
+
+dayjs.extend(utc);
+
+/** The window the timeline covers, and therefore the window that must be scored. */
+const TIMELINE_DAYS_BACK = 4;
+const TIMELINE_DAYS_FORWARD = 2;
 
 /**
  * Shared by the read and the generate route so a generate response can go straight
@@ -46,6 +53,20 @@ const responseSchema = z.object({
         compatibility: z.any(),
         score: z.number(),
         date: z.string(),
+        /**
+         * The scored window around the day, oldest first and never sparse — a day the
+         * pair had no row for is computed on read. One number a day, because that is
+         * what a pair has: the same 0-100 as `score`, on this pair's own normal.
+         */
+        timeline: z.array(
+            z.object({
+                date: z.string(),
+                isToday: z.boolean(),
+                isTomorrow: z.boolean(),
+                isYesterday: z.boolean(),
+                score: z.number(),
+            })
+        ),
         /**
          * The aspects today's sky makes to the two natal charts, most exact first — the
          * same shape the daily horoscope and the Moon screen use, so the app renders all
@@ -198,7 +219,74 @@ async function loadPersonWithScore(
     return stored && stored.score !== null && stored.compatibility !== null ? (stored as Person) : null;
 }
 
-function toResponse(person: Person, date: string, access: AccessState) {
+/**
+ * The scored window around the day, computing the days that are missing.
+ *
+ * Scoring is deterministic and idempotent, so it is safe on the read path — and this is
+ * what keeps the timeline whole: the window moves every midnight, and nothing else
+ * scores a day for a pair until somebody opens it.
+ */
+async function loadTimeline(
+    db: FastifyInstance["db"],
+    input: { person: Person; date: string; userChart: NatalChart; timezone: string | null }
+): Promise<{ date: string; score: number }[]> {
+    const { person } = input;
+
+    const dates = datesAround(TIMELINE_DAYS_BACK, TIMELINE_DAYS_FORWARD, input.date);
+
+    const stored = await db
+        .select({ date: compatibilityPeopleScores.date, score: compatibilityPeopleScores.score })
+        .from(compatibilityPeopleScores)
+        .where(and(eq(compatibilityPeopleScores.personId, person.id), inArray(compatibilityPeopleScores.date, dates)));
+
+    const scores = new Map(stored.map((row) => [row.date, row.score]));
+    const missing = dates.filter((date) => !scores.has(date));
+
+    if (missing.length > 0) {
+        const values = [];
+
+        for (const date of missing) {
+            const { planets } = await getOrCreateTransits(db, date, input.timezone);
+
+            const { compatibility, score } = scoreDay({
+                readerChart: input.userChart,
+                personChart: person.birthChart,
+                baseOverall: person.baseCompatibility.overall,
+                transits: planets,
+            });
+
+            values.push({ personId: person.id, date, score, compatibility });
+            scores.set(date, score);
+        }
+
+        // Another request may have scored the same days meanwhile. The value is
+        // deterministic, so whichever row won holds what this one computed.
+        await db.insert(compatibilityPeopleScores).values(values).onConflictDoNothing();
+    }
+
+    return dates.flatMap((date) => {
+        const score = scores.get(date);
+
+        return score === undefined ? [] : [{ date, score }];
+    });
+}
+
+async function toResponse(
+    db: FastifyInstance["db"],
+    input: { person: Person; date: string; access: AccessState; userChart: NatalChart; timezone: string | null }
+) {
+    const { person, date, access } = input;
+
+    const tomorrow = dayjs.utc(date).add(1, "day").format("YYYY-MM-DD");
+    const yesterday = dayjs.utc(date).add(-1, "day").format("YYYY-MM-DD");
+
+    const timeline = await loadTimeline(db, {
+        person,
+        date,
+        userChart: input.userChart,
+        timezone: input.timezone,
+    });
+
     // Only the deterministic half goes through the serializer: it turns numeric-looking
     // strings into numbers, which is right for numeric columns and wrong for free text.
     const deterministic = serializeDrizzleData({
@@ -221,6 +309,12 @@ function toResponse(person: Person, date: string, access: AccessState) {
         // Derived from the stored blob the score was built from, so the aspects on the
         // screen are always the ones the text was written from.
         aspects: dailyContacts(person.compatibility),
+        timeline: timeline.map((item) => ({
+            ...item,
+            isToday: item.date === date,
+            isTomorrow: item.date === tomorrow,
+            isYesterday: item.date === yesterday,
+        })),
     });
 
     return { ...deterministic, access, content: describeContent(person, access) };
@@ -507,7 +601,15 @@ export default (async (fastify) => {
                     });
                 }
 
-                return reply.status(200).send({ data: toResponse(person, date, access) });
+                return reply.status(200).send({
+                    data: await toResponse(fastify.db, {
+                        person,
+                        date,
+                        access,
+                        userChart: session.profile.birthChart,
+                        timezone: session.profile.timezone,
+                    }),
+                });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";
 
@@ -625,16 +727,20 @@ export default (async (fastify) => {
                     timezone: session.profile.timezone,
                 });
 
+                const access = await checkAccess(fastify.db, {
+                    userId: session.user.id,
+                    feature: "compatibilityDetail",
+                    resourceKey: creditKeys.compatibilityDetail(person.id, date),
+                });
+
                 return reply.status(202).send({
-                    data: toResponse(
-                        claimed ?? person,
+                    data: await toResponse(fastify.db, {
+                        person: claimed ?? person,
                         date,
-                        await checkAccess(fastify.db, {
-                            userId: session.user.id,
-                            feature: "compatibilityDetail",
-                            resourceKey: creditKeys.compatibilityDetail(person.id, date),
-                        })
-                    ),
+                        access,
+                        userChart: session.profile.birthChart,
+                        timezone: session.profile.timezone,
+                    }),
                 });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";

@@ -2,6 +2,7 @@ import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import timezonePlugin from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
+import { count, eq } from "drizzle-orm";
 import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { find as geoTz } from "geo-tz";
@@ -14,9 +15,12 @@ import { calculateCompatibility } from "../../../modules/compatibilityPeople/asp
 import { BASE_NORMALIZER } from "../../../modules/compatibilityPeople/calibration";
 import { scoreDay } from "../../../modules/compatibilityPeople/daily";
 import { normalizeScore } from "../../../modules/compatibilityPeople/normalizer";
+import { MAX_COMPATIBILITY_PEOPLE } from "../../../modules/credits/costs";
+import { creditKeys } from "../../../modules/credits/keys";
+import { refundUnlock, spendCredits } from "../../../modules/credits/service";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
-import { takeUniqueOrThrow } from "../../../utils/drizzleUtils";
 import { Genders, getSunSign, Relationships, ZodiacSign } from "../../../utils/natalUtils";
+import { insufficientCreditsSchema } from "../../../utils/zodResponse";
 import { MIN_AGE } from "../../profile/add";
 
 dayjs.extend(utc);
@@ -58,10 +62,13 @@ export default (async (fastify) => {
                             message: z.string(),
                         }),
                     }),
+                    402: insufficientCreditsSchema,
                     409: z.object({
                         error: z.object({
                             code: z.string(),
                             message: z.string(),
+                            /** Answered with a message in place, not an alert. */
+                            silent: z.boolean().optional(),
                         }),
                     }),
                     500: z.object({
@@ -97,6 +104,26 @@ export default (async (fastify) => {
             }
 
             try {
+                /**
+                 * The cap, before anything expensive. Checked here rather than trusted
+                 * from the app: every saved person is another reading written each day,
+                 * so this is a limit on our own cost and not only on the screen.
+                 */
+                const [saved] = await fastify.db
+                    .select({ total: count() })
+                    .from(compatibilityPeople)
+                    .where(eq(compatibilityPeople.userId, session.user.id));
+
+                if ((saved?.total ?? 0) >= MAX_COMPATIBILITY_PEOPLE) {
+                    return reply.status(409).send({
+                        error: {
+                            code: "person_limit_reached",
+                            message: `You can save up to ${MAX_COMPATIBILITY_PEOPLE} people.`,
+                            silent: true,
+                        },
+                    });
+                }
+
                 // get sun sign from birth date
                 const sunSign: ZodiacSign = getSunSign(dayjs(request.body.birthDate).toDate()).name;
 
@@ -156,11 +183,48 @@ export default (async (fastify) => {
                 // how compatible they are at all — a comparison against every other pair
                 const baseScore = normalizeScore(baseCompatibility.overall, BASE_NORMALIZER);
 
-                const compatibilityPersonId = await fastify.db.transaction(async (tx) => {
-                    // save compatibility person to database
-                    const { id } = await tx
-                        .insert(compatibilityPeople)
-                        .values({
+                /**
+                 * The id is minted here rather than by the database, because the charge
+                 * has to name what it is paying for and it happens first.
+                 */
+                const compatibilityPersonId = crypto.randomUUID();
+
+                /**
+                 * Paid for before the person exists, so nobody is ever created for free.
+                 * If the write below fails, the credits go back — which is the right way
+                 * round: a refund leaves no trace, whereas creating first and deleting on
+                 * a failed charge would briefly show a person who had not been paid for.
+                 *
+                 * Subscribers pass through at a cost of zero, so this reads the same for
+                 * them as for anyone else.
+                 */
+                const spend = await spendCredits(fastify.db, {
+                    userId: session.user.id,
+                    feature: "compatibilityPerson",
+                    resourceKey: creditKeys.compatibilityPerson(compatibilityPersonId),
+                });
+
+                if (!spend.ok) {
+                    return reply.status(402).send({
+                        error: {
+                            code: "insufficient_credits" as const,
+                            message: "Not enough credits to add a person.",
+                            silent: true as const,
+                            details: {
+                                feature: "compatibilityPerson",
+                                cost: spend.cost,
+                                balance: spend.balance,
+                                nextCreditAt: spend.nextCreditAt?.toISOString() ?? null,
+                            },
+                        },
+                    });
+                }
+
+                try {
+                    await fastify.db.transaction(async (tx) => {
+                        // save compatibility person to database
+                        await tx.insert(compatibilityPeople).values({
+                            id: compatibilityPersonId,
                             userId: session.user.id,
                             name: request.body.name,
                             gender: request.body.gender,
@@ -177,22 +241,35 @@ export default (async (fastify) => {
                             baseScore,
                             baseCompatibility,
                             timezone,
-                        })
-                        .returning({
-                            id: compatibilityPeople.id,
-                        })
-                        .then(takeUniqueOrThrow);
+                        });
 
-                    // save compatibility score to database
-                    await tx.insert(compatibilityPeopleScores).values({
-                        date,
-                        personId: id,
-                        score: overallScore,
-                        compatibility: dailyCompatibility,
+                        // save compatibility score to database
+                        await tx.insert(compatibilityPeopleScores).values({
+                            date,
+                            personId: compatibilityPersonId,
+                            score: overallScore,
+                            compatibility: dailyCompatibility,
+                        });
                     });
+                } catch (error: unknown) {
+                    /**
+                     * Nothing was written, so nothing is owed. The refund deletes the
+                     * unlock row as well, which means a second attempt is a fresh
+                     * purchase rather than one that silently finds itself already paid.
+                     */
+                    await refundUnlock(fastify.db, {
+                        userId: session.user.id,
+                        feature: "compatibilityPerson",
+                        resourceKey: creditKeys.compatibilityPerson(compatibilityPersonId),
+                    }).catch((refundError: unknown) =>
+                        request.log.error(
+                            { err: refundError, userId: session.user.id, compatibilityPersonId },
+                            "Failed to refund after a failed person creation"
+                        )
+                    );
 
-                    return id;
-                });
+                    throw error;
+                }
 
                 return reply.status(200).send({
                     data: { compatibilityPersonId },

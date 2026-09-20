@@ -660,6 +660,76 @@ export const transit = pgTable(
     (table) => [primaryKey({ columns: [table.date, table.utcOffset] })]
 );
 
+/**
+ * A logical pass of pre-generation over one target date.
+ *
+ * Exists to be unique. Two schedulers, a redeployed process or a retried tick must not
+ * be able to start the same pass twice and pay Gemini twice for the same work, and the
+ * constraint below is what makes that impossible rather than unlikely.
+ *
+ * It deliberately says nothing about whether any given day got written — that lives on
+ * the content row, and a second place claiming to know it would be a second thing to
+ * keep in step.
+ */
+export const generationRuns = pgTable(
+    "generation_runs",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        /** The day being written, not the day the writing happens. */
+        targetDate: date("target_date", { mode: "string" }).notNull(),
+        /**
+         * Which kind of text this pass writes. Separate runs per type because they do not
+         * start together: the Moon and the planets read the horoscope for continuity, so
+         * they can only be submitted once it exists.
+         */
+        contentType: text("content_type")
+            .$type<"dailyInsight" | "moonInsight" | "planetInsight" | "compatibilityDetail">()
+            .notNull(),
+        /** 1 is the batch pass, 2 the interactive sweep that closes the gap before the day. */
+        pass: integer("pass").notNull(),
+        status: text("status").$type<"running" | "completed" | "failed">().default("running").notNull(),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        completedAt: timestamp("completed_at"),
+    },
+    (table) => [uniqueIndex("generation_runs_date_type_pass_idx").on(table.targetDate, table.contentType, table.pass)]
+);
+
+/**
+ * One submitted Gemini batch inside a run.
+ *
+ * Separate from the run because a single pass will not stay a single batch: the work
+ * splits by timezone, by region or simply by size long before 50,000 readers, and a
+ * unique key that allowed only one job per day would have to be torn out the first time
+ * that happened.
+ */
+export const generationBatches = pgTable(
+    "generation_batches",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        runId: text("run_id")
+            .notNull()
+            .references(() => generationRuns.id, { onDelete: "cascade" }),
+        /** Whatever the run was split on — a UTC offset, a region, a shard number. */
+        shardKey: text("shard_key").notNull(),
+        /** Gemini's own name for the job, and how it is polled and cancelled. */
+        providerBatchId: text("provider_batch_id"),
+        status: text("status")
+            .$type<"submitted" | "completed" | "failed" | "cancelled">()
+            .default("submitted")
+            .notNull(),
+        itemCount: integer("item_count").notNull(),
+        submittedAt: timestamp("submitted_at").defaultNow().notNull(),
+        completedAt: timestamp("completed_at"),
+    },
+    (table) => [uniqueIndex("generation_batches_run_shard_idx").on(table.runId, table.shardKey)]
+);
+
 export const profile = pgTable(
     "profile",
     {
@@ -687,12 +757,21 @@ export const profile = pgTable(
         careerStage: text("career_stage").notNull(),
         decisionStyle: text("decision_style").notNull(),
         areasOfInterest: text("areas_of_interest").array().notNull(),
-        goalsForTheYear: text("goals_for_the_year").array().notNull(),
         contentPreference: text("content_preference").notNull(),
         beliefLevel: text("belief_level").notNull(),
         personalityProfile: text("personality_profile").notNull(),
         personalityProfileInput: text("personality_profile_input").notNull(),
         timezone: text("timezone").notNull(),
+        /**
+         * When the app was last opened, to the hour.
+         *
+         * Pre-generation is bought speculatively — the content is written before anyone
+         * asks for it and paid for whether or not they come back — so it is offered only
+         * to people who have been around recently. Kept coarse on purpose: this is a
+         * cohort filter, not analytics, and writing it precisely would mean a row update
+         * on every request.
+         */
+        lastActiveAt: timestamp("last_active_at"),
         notificationToken: text("notification_token"),
         country: text("country").notNull(),
         language: text("language").notNull(),
@@ -706,6 +785,8 @@ export const profile = pgTable(
     (table) => [
         index("profile_birth_place_lat_lng_idx").on(table.birthPlaceLat, table.birthPlaceLng),
         index("profile_notification_token_idx").on(table.notificationToken),
+        // The scheduler sweeps by recency every hour; without this it is a full scan.
+        index("profile_last_active_at_idx").on(table.lastActiveAt),
     ]
 );
 

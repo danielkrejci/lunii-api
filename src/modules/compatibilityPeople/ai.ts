@@ -491,34 +491,11 @@ export async function generateCompatibilityInsight(
         error: string | null;
     };
 }> {
-    const language = getLanguageByIso(languageIso);
-
-    // Person A is the reader — the gendered forms and the profile are theirs.
-    const prompt = buildPrompt(
-        language ? buildPromptLanguageRule(language, input.reader.gender) : languageIso,
-        buildReaderBlock(input.reader),
-        input
-    );
+    const { prompt, config } = buildCompatibilityInsightRequest(languageIso, input);
 
     const startedAt = Date.now();
 
-    const response = await ai.models.generateContent({
-        model: MODEL,
-        contents: prompt,
-        config: {
-            /**
-             * Thinking off. Measured on the daily prompt: the default budget spends
-             * 2 000–9 500 hidden tokens, costs 40 % more and takes 48–64 s instead of 27 s,
-             * and the only thing it bought was reaching back for the address rule buried at
-             * the end of the prompt. That rule now sits at the top as well, so there is
-             * nothing left for it to buy.
-             */
-            thinkingConfig: { thinkingBudget: 0 },
-            temperature: 0.5,
-            responseMimeType: "application/json",
-            responseJsonSchema: toResponseJsonSchema(answerSchema),
-        },
-    });
+    const response = await ai.models.generateContent({ model: MODEL, contents: prompt, config });
 
     const text = response.text ?? "";
 
@@ -547,6 +524,60 @@ export async function generateCompatibilityInsight(
         error: null as string | null,
     };
 
+    const read = readCompatibilityInsightAnswer(text, input, response.candidates?.[0]?.finishReason);
+
+    return {
+        content: read.content,
+        usage: { ...usage, error: read.error },
+    };
+}
+
+/**
+ * Everything a call needs, assembled without making one. Shared by the interactive path
+ * and the nightly batch so the two cannot drift apart.
+ */
+export function buildCompatibilityInsightRequest(
+    languageIso: string,
+    input: CompatibilityInsightInput
+): { prompt: string; config: Record<string, unknown> } {
+    const language = getLanguageByIso(languageIso);
+
+    // Person A is the reader — the gendered forms and the profile are theirs.
+    const prompt = buildPrompt(
+        language ? buildPromptLanguageRule(language, input.reader.gender) : languageIso,
+        buildReaderBlock(input.reader),
+        input
+    );
+
+    return {
+        prompt,
+        config: {
+            /**
+             * Thinking off. Measured on the daily prompt: the default budget spends
+             * 2 000–9 500 hidden tokens, costs 40 % more and takes 48–64 s instead of 27 s,
+             * and the only thing it bought was reaching back for the address rule buried at
+             * the end of the prompt. That rule now sits at the top as well, so there is
+             * nothing left for it to buy.
+             */
+            thinkingConfig: { thinkingBudget: 0 },
+            temperature: 0.5,
+            responseMimeType: "application/json",
+            responseJsonSchema: toResponseJsonSchema(answerSchema),
+        },
+    };
+}
+
+/**
+ * Turns whatever the model said into a reading, or explains why it could not.
+ *
+ * Takes the same input the prompt was built from, because the answer is keyed against
+ * the engine's aspects: one the model dropped or renamed still gets an entry.
+ */
+export function readCompatibilityInsightAnswer(
+    text: string,
+    input: CompatibilityInsightInput,
+    finishReason?: string
+): { content: CompatibilityInsightContent | null; error: string | null } {
     const raw = parseLLMJson<unknown>(text);
     const parsed = raw === null ? null : answerSchema.safeParse(raw);
 
@@ -566,17 +597,14 @@ export async function generateCompatibilityInsight(
 
         return {
             content: null,
-            usage: {
-                ...usage,
-                error: `${reason} (finishReason: ${response.candidates?.[0]?.finishReason ?? "unknown"}, ${text.length} chars)`,
-            },
+            error: `${reason} (finishReason: ${finishReason ?? "unknown"}, ${text.length} chars)`,
         };
     }
 
     const result = parsed.data;
 
     return {
-        usage,
+        error: null,
         content: {
             overview: result.overview,
             // Trimmed and emptied out here so no screen has to defend against a blank

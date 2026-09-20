@@ -2,10 +2,12 @@ import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
+import { and, eq } from "drizzle-orm";
 import { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
+import { dailyInsights } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { buildDayContext } from "../../modules/chat/context";
 import { buildHistory, HISTORY_FETCH_LIMIT } from "../../modules/chat/history";
@@ -21,8 +23,7 @@ import {
 import { openSseChannel } from "../../modules/chat/sse";
 import { runChatGeneration } from "../../modules/chat/stream";
 import { MAX_MESSAGE_LENGTH } from "../../modules/chat/types";
-import { creditKeys } from "../../modules/credits/keys";
-import { spendCredits } from "../../modules/credits/service";
+import { hasActiveSubscription } from "../../modules/credits/service";
 
 dayjs.extend(utc);
 
@@ -85,6 +86,60 @@ async function requireReader(request: FastifyRequest, reply: FastifyReply) {
     }
 
     return { userId: session.user.id, profile: session.profile };
+}
+
+/**
+ * Whether this reader may ask anything at all, and whether the day is ready to answer
+ * from. Both fail the same way — nothing is written and nothing is charged.
+ *
+ * Chat is part of the subscription now rather than something bought a question at a
+ * time, which is what makes its context safe: a subscriber has `unlocked: true` on
+ * everything, so the horoscope in the prompt can never be a text they have not paid for.
+ * That single fact removes the whole problem of leaking withheld content into an answer
+ * that costs a fraction of it.
+ *
+ * The readiness half is the other side of the same coin. The prompt carries the
+ * horoscope under a heading that tells the model this is what the reader has already
+ * read, so answering before it exists would have the model inventing the one thing the
+ * reader is most likely to ask about. Waiting is better than guessing.
+ */
+async function requireChatAccess(
+    fastify: FastifyInstance,
+    input: { userId: string; date: string },
+    reply: FastifyReply
+): Promise<boolean> {
+    if (!(await hasActiveSubscription(fastify.db, input.userId))) {
+        await reply.status(403).send({
+            error: {
+                code: "subscription_required",
+                message: "Chat is part of the subscription.",
+                // Answered with the paywall, not an alert.
+                silent: true,
+            },
+        });
+
+        return false;
+    }
+
+    const daily = await fastify.db.query.dailyInsights.findFirst({
+        columns: { status: true, content: true },
+        where: and(eq(dailyInsights.userId, input.userId), eq(dailyInsights.date, input.date)),
+    });
+
+    if (!daily?.content) {
+        await reply.status(409).send({
+            error: {
+                code: "context_not_ready",
+                message: "Today's horoscope is still being written.",
+                silent: true,
+                details: { dailyInsight: daily?.status ?? "absent" },
+            },
+        });
+
+        return false;
+    }
+
+    return true;
 }
 
 /**
@@ -211,35 +266,13 @@ export default (async (fastify) => {
                 }
 
                 /**
-                 * Charged before anything is written, and keyed on the client's own send
-                 * id — the same key `startTurn` is idempotent on. A retried POST therefore
-                 * attaches to the turn it already created AND finds the credit it already
-                 * paid, so the two mechanisms agree without either knowing about the other.
-                 *
-                 * Sent as a plain non-200 body rather than through the stream: nothing has
-                 * been written, the reply is still ours, and the client already turns any
-                 * pre-stream error body into a code it can act on.
+                 * Checked before anything is written, and sent as a plain non-200 body
+                 * rather than through the stream: nothing has been written, the reply is
+                 * still ours, and the client already turns any pre-stream error body into
+                 * a code it can act on.
                  */
-                const spend = await spendCredits(fastify.db, {
-                    userId: reader.userId,
-                    feature: "chatMessage",
-                    resourceKey: creditKeys.chatMessage(request.body.clientId),
-                });
-
-                if (!spend.ok) {
-                    return reply.status(402).send({
-                        error: {
-                            code: "insufficient_credits",
-                            message: "Not enough credits to ask a question.",
-                            silent: true,
-                            details: {
-                                feature: "chatMessage",
-                                cost: spend.cost,
-                                balance: spend.balance,
-                                nextCreditAt: spend.nextCreditAt?.toISOString() ?? null,
-                            },
-                        },
-                    });
+                if (!(await requireChatAccess(fastify, { userId: reader.userId, date }, reply))) {
+                    return reply;
                 }
 
                 const { systemInstruction, dayContext, closing } = await buildRequestContext(fastify, {
@@ -362,6 +395,10 @@ export default (async (fastify) => {
                     });
                 }
 
+                if (!(await requireChatAccess(fastify, { userId: reader.userId, date }, reply))) {
+                    return reply;
+                }
+
                 const { systemInstruction, dayContext, closing } = await buildRequestContext(fastify, {
                     userId: reader.userId,
                     profile: reader.profile,
@@ -373,28 +410,6 @@ export default (async (fastify) => {
                  * can be taken, and only one taker wins. The position is reused, so the
                  * thread does not grow a gap of dead answers.
                  */
-                const spend = await spendCredits(fastify.db, {
-                    userId: reader.userId,
-                    feature: "chatMessage",
-                    resourceKey: creditKeys.chatMessage(request.body.clientId),
-                });
-
-                if (!spend.ok) {
-                    return reply.status(402).send({
-                        error: {
-                            code: "insufficient_credits",
-                            message: "Not enough credits to ask a question.",
-                            silent: true,
-                            details: {
-                                feature: "chatMessage",
-                                cost: spend.cost,
-                                balance: spend.balance,
-                                nextCreditAt: spend.nextCreditAt?.toISOString() ?? null,
-                            },
-                        },
-                    });
-                }
-
                 const claimed = await claimRetry(fastify.db, {
                     userId: reader.userId,
                     conversationId: request.body.conversationId,

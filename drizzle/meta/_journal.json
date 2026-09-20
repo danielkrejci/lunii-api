@@ -232,6 +232,20 @@
       "when": 1789046698816,
       "tag": "0032_credits_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1789495499488,
+      "tag": "0033_drop_goals_for_the_year",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1789767644307,
+      "tag": "0034_worthless_phalanx",
+      "breakpoints": true
     }
   ]
 }

@@ -322,32 +322,11 @@ export async function generatePlanetInsights(input: {
         error: string | null;
     };
 }> {
-    const language = getLanguageByIso(input.languageIso);
-
-    const prompt = buildPrompt({
-        planets: input.planets,
-        // The panel is about the chart's bodies, so the placements the reader block names
-        // come from the contacts on show rather than from the day's strongest impacts.
-        readerBlock: buildReaderBlock(
-            input.reader,
-            input.planets.flatMap((planet) => planet.contacts)
-        ),
-        teaser: input.teaser,
-        language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
-    });
+    const { prompt, config } = buildPlanetInsightsRequest(input);
 
     const startedAt = Date.now();
 
-    const response = await ai.models.generateContent({
-        model: MODEL,
-        contents: prompt,
-        config: {
-            /** See the note in modules/insights — thinking bought nothing but latency. */
-            thinkingConfig: { thinkingBudget: 0 },
-            responseMimeType: "application/json",
-            responseJsonSchema: toResponseJsonSchema(answerSchema),
-        },
-    });
+    const response = await ai.models.generateContent({ model: MODEL, contents: prompt, config });
 
     const text = response.text ?? "";
 
@@ -372,6 +351,60 @@ export async function generatePlanetInsights(input: {
         error: null as string | null,
     };
 
+    const read = readPlanetInsightsAnswer(text, input.planets, response.candidates?.[0]?.finishReason);
+
+    return {
+        content: read.content,
+        usage: { ...usage, output: getLLMJson(text), error: read.error },
+    };
+}
+
+/**
+ * Everything a call needs, assembled without making one. Shared by the interactive path
+ * and the nightly batch so the two cannot drift apart.
+ */
+export function buildPlanetInsightsRequest(input: {
+    planets: PlanetWeight[];
+    reader: Reader;
+    teaser: DailyTeaser | null;
+    languageIso: string;
+}): { prompt: string; config: Record<string, unknown> } {
+    const language = getLanguageByIso(input.languageIso);
+
+    const prompt = buildPrompt({
+        planets: input.planets,
+        // The panel is about the chart's bodies, so the placements the reader block names
+        // come from the contacts on show rather than from the day's strongest impacts.
+        readerBlock: buildReaderBlock(
+            input.reader,
+            input.planets.flatMap((planet) => planet.contacts)
+        ),
+        teaser: input.teaser,
+        language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
+    });
+
+    return {
+        prompt,
+        config: {
+            /** See the note in modules/insights — thinking bought nothing but latency. */
+            thinkingConfig: { thinkingBudget: 0 },
+            responseMimeType: "application/json",
+            responseJsonSchema: toResponseJsonSchema(answerSchema),
+        },
+    };
+}
+
+/**
+ * Turns whatever the model said into a panel, or explains why it could not.
+ *
+ * Takes the engine's weights as well as the text: the answer is keyed against them, so a
+ * body the model dropped or renamed still gets an entry rather than vanishing.
+ */
+export function readPlanetInsightsAnswer(
+    text: string,
+    planets: PlanetWeight[],
+    finishReason?: string
+): { content: PlanetInsightContent | null; error: string | null } {
     const raw = parseLLMJson<unknown>(text);
     const parsed = raw === null ? null : answerSchema.safeParse(raw);
 
@@ -386,23 +419,19 @@ export async function generatePlanetInsights(input: {
 
         return {
             content: null,
-            usage: {
-                ...usage,
-                output: getLLMJson(text),
-                error: `${reason} (finishReason: ${response.candidates?.[0]?.finishReason ?? "unknown"}, ${text.length} chars)`,
-            },
+            error: `${reason} (finishReason: ${finishReason ?? "unknown"}, ${text.length} chars)`,
         };
     }
 
     return {
-        usage: { ...usage, output: getLLMJson(text) },
+        error: null,
         content: {
             /**
              * Driven by the engine's list, not the model's: a body or contact the model
              * dropped, duplicated or renamed still gets an entry, falling back to the
              * English wording rather than disappearing from the panel.
              */
-            planets: input.planets.map((planet) => {
+            planets: planets.map((planet) => {
                 const written = parsed.data.planets.find((entry) => entry.name === planet.name);
 
                 return {

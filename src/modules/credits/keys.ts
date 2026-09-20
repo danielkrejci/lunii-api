@@ -20,6 +20,13 @@ export const creditKeys = {
     compatibilityDetail: (personId: string, date: string) => `${personId}:${date}`,
 
     /**
+     * The person, with no date in it: adding them is paid once and stays paid for as
+     * long as they exist. Deleting and adding again makes a new id, so it is a new
+     * purchase — which is the intended behaviour, not an accident of the key.
+     */
+    compatibilityPerson: (personId: string) => personId,
+
+    /**
      * The client's own send id — which is exactly why a retried POST is free. It is the
      * same key `startTurn` is idempotent on, so the two mechanisms agree without either
      * knowing about the other.

@@ -3,8 +3,6 @@ import { FastifyBaseLogger, FastifyInstance } from "fastify";
 
 import { aiGenerations } from "../../db/schema";
 import { ai } from "../../lib/ai";
-import { creditKeys } from "../credits/keys";
-import { refundUnlock } from "../credits/service";
 import { completeMessage, failMessage, writePartialContent } from "./service";
 import { SseChannel } from "./sse";
 import { ChatErrorCode } from "./types";
@@ -157,21 +155,6 @@ export async function runChatGeneration(input: {
 
     const failed = failure ? await failMessage(db, { messageId, claimedAt, errorCode, content: answer }) : null;
     const stored = failure ? failed !== null : await completeMessage(db, { messageId, claimedAt, content: answer });
-
-    /**
-     * An answer that never arrived is given back. Keyed on the send that paid for it,
-     * which the assistant row carries precisely so this path can find it — a retry
-     * overwrites it, so what is refunded is always the attempt that just failed.
-     *
-     * Never allowed to be the reason the failure itself goes unrecorded.
-     */
-    if (failed?.chargeKey) {
-        await refundUnlock(db, {
-            userId: input.userId,
-            feature: "chatMessage",
-            resourceKey: creditKeys.chatMessage(failed.chargeKey),
-        }).catch((error: unknown) => log.error({ err: error, messageId }, "Failed to refund a chat credit"));
-    }
 
     if (!stored) {
         // Nothing matched: the row moved on while the model was writing. Worth saying

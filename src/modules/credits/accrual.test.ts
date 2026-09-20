@@ -17,9 +17,10 @@ function ago(hours: number): Date {
 describe("project", () => {
     it("keeps the part-hour: spending at half past still earns on the hour", () => {
         // Anchor 10:00, now 13:30, three and a half hours gone.
-        const result = project({ balance: 19, anchor: ago(3.5), now: NOW });
+        // Expressed against the cap, so lowering it does not turn a rule into a failure.
+        const result = project({ balance: CREDIT_CAP - 5, anchor: ago(3.5), now: NOW });
 
-        assert.equal(result.balance, 22, "three whole hours credited, the half discarded");
+        assert.equal(result.balance, CREDIT_CAP - 2, "three whole hours credited, the half discarded");
         assert.equal(
             result.anchor.toISOString(),
             "2026-09-10T13:00:00.000Z",
@@ -43,9 +44,9 @@ describe("project", () => {
     });
 
     it("tops up to the cap and no further", () => {
-        const result = project({ balance: 22, anchor: ago(5), now: NOW });
+        const result = project({ balance: CREDIT_CAP - 2, anchor: ago(5), now: NOW });
 
-        assert.equal(result.balance, CREDIT_CAP, "22 + 5 is 24, not 27");
+        assert.equal(result.balance, CREDIT_CAP, "two short of the cap plus five hours stops at the cap");
         assert.equal(result.nextCreditAt, null);
     });
 
@@ -67,10 +68,10 @@ describe("project", () => {
 
         const later = new Date(NOW.getTime() + 59 * 60_000);
         const before = project({ balance: afterSpend, anchor: full.anchor, now: later });
-        assert.equal(before.balance, 19, "nothing yet at fifty-nine minutes");
+        assert.equal(before.balance, CREDIT_CAP - 5, "nothing yet at fifty-nine minutes");
 
         const after = project({ balance: afterSpend, anchor: full.anchor, now: new Date(NOW.getTime() + HOUR) });
-        assert.equal(after.balance, 20, "exactly one credit at the hour");
+        assert.equal(after.balance, CREDIT_CAP - 4, "exactly one credit at the hour");
     });
 
     it("credits on the hour boundary itself, not a moment after", () => {
@@ -95,9 +96,9 @@ describe("project", () => {
     });
 
     it("reports when a partly-filled wallet will be full", () => {
-        const result = project({ balance: 20, anchor: NOW, now: NOW });
+        const result = project({ balance: CREDIT_CAP - 4, anchor: NOW, now: NOW });
 
-        assert.equal(result.balance, 20);
+        assert.equal(result.balance, CREDIT_CAP - 4);
         assert.equal(result.fullAt?.toISOString(), new Date(NOW.getTime() + 4 * HOUR).toISOString());
     });
 

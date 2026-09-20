@@ -22,6 +22,12 @@ export const CREDIT_FEATURES = [
     "moonInsight",
     "planetInsight",
     "compatibilityDetail",
+    /**
+     * Adding a person, not reading about them. The first purchase here that buys a thing
+     * rather than a text — which is why it is keyed on the person and not on a date: it
+     * is paid once, when they are created, and never again while they exist.
+     */
+    "compatibilityPerson",
     "chatMessage",
 ] as const;
 
@@ -87,7 +93,7 @@ export type RevenuecatEventStatus = (typeof REVENUECAT_EVENT_STATUSES)[number];
  * Not a ceiling on the balance itself: a bought pack may leave a reader above this, and
  * regeneration then simply does nothing until they spend back down. See `accrual.ts`.
  */
-export const CREDIT_CAP = 24;
+export const CREDIT_CAP = 15;
 
 /** One credit per hour. */
 export const CREDIT_REGEN_SECONDS = 3600;

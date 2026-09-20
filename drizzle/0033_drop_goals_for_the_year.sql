@@ -1,0 +1,1 @@
+ALTER TABLE "profile" DROP COLUMN "goals_for_the_year";

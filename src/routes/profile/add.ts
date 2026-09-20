@@ -30,12 +30,6 @@ export default (async (fastify) => {
                         .string()
                         .min(1, "Please select your gender.")
                         .refine((value) => Genders.includes(value as Gender), "Invalid gender."),
-                    /**
-                     * Wall clock, not an instant. The chart is built from the calendar
-                     * date and clock time the user picked, put into the timezone of the
-                     * birth place — an ISO timestamp would already carry the phone's
-                     * offset and land on the wrong day for anyone east or west of here.
-                     */
                     birthDate: z
                         .string()
                         .regex(/^\d{4}-\d{2}-\d{2}$/u, "Birth date must be YYYY-MM-DD.")
@@ -86,10 +80,6 @@ export default (async (fastify) => {
                         .array(z.string())
                         .min(1, "Please select 1 to 3 options that best suit you.")
                         .max(3, "You can select up to 3 areas of interest."),
-                    goalsForTheYear: z
-                        .array(z.string())
-                        .min(1, "Please select 1 to 3 goals for this year.")
-                        .max(3, "You can select up to 3 goals for this year."),
                     contentPreference: z.string().min(1, "Please select your content preference."),
                     beliefLevel: z.string().min(1, "Please select your belief level."),
                     personalityProfile: z.string().min(1, "Please select your personality profile."),
@@ -184,7 +174,6 @@ export default (async (fastify) => {
                     careerStage: request.body.careerStage,
                     decisionStyle: request.body.decisionStyle,
                     areasOfInterest: request.body.areasOfInterest,
-                    goalsForTheYear: request.body.goalsForTheYear,
                     contentPreference: request.body.contentPreference,
                     beliefLevel: request.body.beliefLevel,
                     personalityProfile: request.body.personalityProfile,

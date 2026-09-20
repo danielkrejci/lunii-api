@@ -26,7 +26,12 @@ type DbOrTx = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
 const nowToMillisecond = sql`date_trunc('milliseconds', now())`;
 
 /** The statuses that still entitle a reader, given `expires_at` has not passed. */
-const ENTITLING_STATUSES = ["active", "canceled", "billing_issue"] as const;
+/**
+ * Exported because pre-generation has to ask the same question in bulk that
+ * `hasActiveSubscription` asks one user at a time. A second copy of this list is a
+ * second definition of who is a subscriber, and the two would not stay the same.
+ */
+export const ENTITLING_STATUSES = ["active", "canceled", "billing_issue"] as const;
 
 export type SpendOutcome =
     /** Credits are switched off entirely. Nothing was read and nothing was written. */
