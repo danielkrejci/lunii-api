@@ -48,16 +48,30 @@ export interface BatchAdapter {
 }
 
 /**
- * The answer text, or nothing.
+ * The answer text, read the way a batch actually hands it over.
  *
- * `GenerateContentResponse.text` is an accessor on the SDK's own class, and the same
- * class carries a batch result — so there is no case where it is missing and the parts
- * have to be walked by hand. It returns `undefined` rather than throwing when the answer
- * is empty or was blocked, and that is the one case worth naming here: walking the parts
- * would find nothing either, because that is exactly what the accessor already did.
+ * `GenerateContentResponse.text` is an accessor on the SDK's class, and on a live reply
+ * it is all you need. A batch result is not a live reply: it is deserialized from the
+ * job's output into a **plain object**, so the accessor does not exist on it and reading
+ * `.text` gives `undefined` no matter what the model wrote.
+ *
+ * This was checked once against the SDK sources, found to be a getter, and the fallback
+ * below was deleted as dead code. It was not dead — that check only covered the
+ * interactive path, and removing it made every batched answer read as empty.
  */
 export function extractText(response: GenerateContentResponse | undefined): string {
-    return response?.text ?? "";
+    if (!response) {
+        return "";
+    }
+
+    if (typeof response.text === "string" && response.text !== "") {
+        return response.text;
+    }
+
+    return (response.candidates?.[0]?.content?.parts ?? [])
+        .map((part) => part.text ?? "")
+        .join("")
+        .trim();
 }
 
 /**
@@ -124,10 +138,16 @@ export async function submitBatch(
     const items = await adapter.claim(fastify, targetDate, shardKey);
 
     if (items.length === 0) {
-        await fastify.db
-            .update(generationBatches)
-            .set({ status: "completed", completedAt: sql`now()` })
-            .where(eq(generationBatches.id, batch.id));
+        /**
+         * Nothing was left to write, so this shard never existed as work.
+         *
+         * The row is removed rather than closed: a cohort is walked until a chunk comes
+         * back empty, so every cohort would otherwise leave one completed batch of zero
+         * items behind, every night, for ever. Deleting is safe because nothing was sent
+         * — the Gemini call is below this — and because the next tick finds chunk zero
+         * already taken and stops before reaching here again.
+         */
+        await fastify.db.delete(generationBatches).where(eq(generationBatches.id, batch.id));
 
         return { submitted: 0 };
     }
@@ -149,6 +169,9 @@ export async function submitBatch(
 
     return { submitted: items.length };
 }
+
+/** How long a reserved shard may go without a job id before it is treated as abandoned. */
+const ORPHANED_AFTER_MS = 2 * 60 * 60 * 1000;
 
 /** Whether a job is still working. Anything else is finished, one way or another. */
 function isRunning(state: string | undefined): boolean {
@@ -175,7 +198,36 @@ export async function collectBatches(fastify: FastifyInstance, adapters: BatchAd
     for (const { batch, run } of open) {
         const adapter = byType.get(run.contentType);
 
-        if (!batch.providerBatchId || !adapter) {
+        if (!adapter) {
+            continue;
+        }
+
+        /**
+         * A row that reserved a shard and never recorded a job is an orphan: the process
+         * died between the two, which a deploy at the top of the hour is exactly placed
+         * to cause. Left alone it blocks its shard for ever — the unique key refuses the
+         * next attempt, and because a cohort is walked from chunk zero, one orphan skips
+         * the whole cohort for that day.
+         *
+         * Deleting frees the shard so the next tick resubmits it. The days it had already
+         * claimed stay `queued` and are not touched here, because this cannot tell them
+         * apart from another batch's; they come back through the stale-`queued` reclaim
+         * or the cut-off, and the reader's own visit covers them in the meantime.
+         *
+         * Two hours, because a submit builds a prompt per reader and is slow at size —
+         * killing a live one would strand its job at the provider, which is worse than
+         * waiting.
+         */
+        if (!batch.providerBatchId) {
+            if (batch.submittedAt.getTime() < Date.now() - ORPHANED_AFTER_MS) {
+                fastify.log.warn(
+                    { batch: batch.id, shardKey: batch.shardKey },
+                    "[BATCH] Releasing a shard whose job was never recorded; a provider job may have been paid for and lost"
+                );
+
+                await fastify.db.delete(generationBatches).where(eq(generationBatches.id, batch.id));
+            }
+
             continue;
         }
 

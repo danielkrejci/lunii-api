@@ -111,7 +111,7 @@ export const dailyInsightAdapter: BatchAdapter = {
                 request: {
                     model: BATCH_MODEL,
                     contents: prompt,
-                    config,
+                    config: forBatch(config),
                     metadata: { userId: profile.userId, date: targetDate },
                 },
             });
@@ -146,6 +146,27 @@ export const dailyInsightAdapter: BatchAdapter = {
         await releaseAllRows(fastify, targetDate);
     },
 };
+
+/**
+ * The interactive config, minus the one thing a batch cannot take.
+ *
+ * `responseJsonSchema` works on the live endpoint and is what keeps the shape honest
+ * there. Inside an inlined batch request it does the opposite: measured over five
+ * identical submissions of the same prompt, four came back as the schema's own keys
+ * filled with `null` and the fifth had `overview` as a string containing JSON rather
+ * than an object. With the field removed, five out of five came back correctly shaped.
+ *
+ * So the schema is dropped here and the answer is still checked — `readDailyInsightAnswer`
+ * validates every response against the same zod schema either way, so a malformed answer
+ * is caught and the day is simply left for the reader's own visit to generate.
+ */
+function forBatch(config: Record<string, unknown>): Record<string, unknown> {
+    const batchConfig = { ...config };
+
+    delete batchConfig.responseJsonSchema;
+
+    return batchConfig;
+}
 
 /**
  * Batch pricing, half the interactive rate.
