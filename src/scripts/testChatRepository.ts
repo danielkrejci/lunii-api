@@ -173,7 +173,7 @@ async function main() {
                 claimedAt: original!.assistantMessage.claimedAt,
                 errorCode: "generation_failed",
                 content: "Saturn is",
-            })) !== null
+            })) === true
         );
 
         check("nothing is streaming any more", (await hasActiveStream(db, owner.id)) === false);
@@ -182,7 +182,6 @@ async function main() {
             userId: owner.id,
             conversationId,
             messageId: original!.assistantMessage.id,
-            chargeKey: crypto.randomUUID(),
         });
 
         check("a failed answer can be retried", retried !== null);
@@ -191,7 +190,6 @@ async function main() {
             userId: owner.id,
             conversationId,
             messageId: original!.assistantMessage.id,
-            chargeKey: crypto.randomUUID(),
         });
 
         check("but only once — the second claim finds nothing", retriedTwice === null);
@@ -200,7 +198,6 @@ async function main() {
             userId: other.id,
             conversationId,
             messageId: original!.assistantMessage.id,
-            chargeKey: crypto.randomUUID(),
         });
 
         check("and never by another reader", strangerRetry === null);

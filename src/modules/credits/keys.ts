@@ -1,3 +1,5 @@
+import { Planet } from "../astro/types";
+
 /**
  * Canonical resource keys — what a purchase is *of*.
  *
@@ -11,10 +13,17 @@ export const creditKeys = {
     moonInsight: (date: string) => date,
 
     /**
-     * The whole panel for a day, not one planet. There is a single `planet_insights` row
-     * per (user, date) holding every planet's text, so one unlock opens all of them.
+     * One planet on one day — although the writing is not divided that way: a single
+     * `planet_insights` row per (user, date) holds every planet's text, written in one
+     * request by whoever opens the first of them.
+     *
+     * Paying per planet rather than per panel is deliberate. A reader who opens Mars
+     * asked for Mars, and charging them for nine more they may never look at prices the
+     * panel by what it cost us rather than by what they wanted. The other side of that
+     * bargain is that the first planet pays for the generation and the rest ride along
+     * for the price of a reveal.
      */
-    planetInsight: (date: string) => date,
+    planetInsight: (planet: Planet, date: string) => `${planet}:${date}`,
 
     /** Ids are UUIDs, so a colon cannot appear inside one and the join is unambiguous. */
     compatibilityDetail: (personId: string, date: string) => `${personId}:${date}`,
@@ -25,11 +34,4 @@ export const creditKeys = {
      * purchase — which is the intended behaviour, not an accident of the key.
      */
     compatibilityPerson: (personId: string) => personId,
-
-    /**
-     * The client's own send id — which is exactly why a retried POST is free. It is the
-     * same key `startTurn` is idempotent on, so the two mechanisms agree without either
-     * knowing about the other.
-     */
-    chatMessage: (clientId: string) => clientId,
 };

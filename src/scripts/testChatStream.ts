@@ -202,7 +202,6 @@ async function main() {
             userId: profile.userId,
             conversationId,
             messageId: failing!.assistantMessage.id,
-            chargeKey: crypto.randomUUID(),
         });
 
         check("the failed answer can be claimed back", claimed !== null);

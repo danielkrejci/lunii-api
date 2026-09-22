@@ -6,8 +6,19 @@ import { eq, sql } from "drizzle-orm";
 import { db, pool } from "../../db";
 import { creditAccounts, creditLedger, creditUnlocks, subscriptions, user } from "../../db/schema";
 import { env } from "../../env";
+import { CREDIT_COSTS } from "./costs";
 import { grantCredits, refundUnlock, spendCredits } from "./service";
 import { CREDIT_CAP } from "./types";
+
+/**
+ * What the feature these tests spend on costs, read from the price list rather than
+ * written down beside it.
+ *
+ * They are about the arithmetic, not about any one feature, and a fixture that hard-codes
+ * a price fails the day the price moves — which is exactly how they broke when chat
+ * stopped costing anything at all.
+ */
+const COST = CREDIT_COSTS.planetInsight;
 
 /**
  * The double-spend guarantee is a property of Postgres re-evaluating a conditional
@@ -74,13 +85,13 @@ describe(
             await pool.end();
         });
 
-        it("lets exactly one of twenty concurrent spends take the last credit", async () => {
-            const userId = await makeUser(1);
+        it("lets exactly one of twenty concurrent spends take what is left", async () => {
+            const userId = await makeUser(COST);
 
             // Distinct resource keys, so the unlock index is not what serialises them —
             // only the conditional decrement is.
             const attempts = Array.from({ length: 20 }, (_, i) =>
-                spendCredits(db, { userId, feature: "chatMessage", resourceKey: `race-${i}` })
+                spendCredits(db, { userId, feature: "planetInsight", resourceKey: `race-${i}` })
             );
 
             const outcomes = await Promise.all(attempts);
@@ -257,17 +268,17 @@ describe(
         });
 
         it("accrues while spending, so a wallet left alone pays for the next thing", async () => {
-            // Empty three hours ago: three credits are owed, and one is about to be spent.
-            const userId = await makeUser(0, 3 * 3600);
+            // Emptied a while ago: one credit more than the spend is owed by now.
+            const userId = await makeUser(0, (COST + 1) * 3600);
 
             const outcome = await spendCredits(db, {
                 userId,
-                feature: "chatMessage",
+                feature: "planetInsight",
                 resourceKey: crypto.randomUUID(),
             });
 
             assert.equal(outcome.ok && outcome.reason, "charged");
-            assert.equal(await balanceOf(userId), 2, "three accrued, one spent");
+            assert.equal(await balanceOf(userId), 1, "one more accrued than was spent");
         });
 
         it("reconciles: the balance is the opening grant plus every ledger row", async () => {
@@ -275,7 +286,7 @@ describe(
 
             await spendCredits(db, { userId, feature: "dailyInsight", resourceKey: "2026-09-17" });
             await spendCredits(db, { userId, feature: "moonInsight", resourceKey: "2026-09-17" });
-            await spendCredits(db, { userId, feature: "chatMessage", resourceKey: crypto.randomUUID() });
+            await spendCredits(db, { userId, feature: "planetInsight", resourceKey: crypto.randomUUID() });
             await refundUnlock(db, { userId, feature: "moonInsight", resourceKey: "2026-09-17" });
             await grantCredits(db, {
                 userId,

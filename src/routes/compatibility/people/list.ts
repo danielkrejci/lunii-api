@@ -8,6 +8,8 @@ import { z } from "zod";
 import { compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { scoreDay } from "../../../modules/compatibilityPeople/daily";
+import { creditKeys } from "../../../modules/credits/keys";
+import { listUnlocked } from "../../../modules/credits/service";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { serializeDrizzleData } from "../../../utils/drizzleUtils";
 import { SINGS_MAP } from "../../../utils/natalUtils";
@@ -31,6 +33,14 @@ export default (async (fastify) => {
                                 sign: z.enum(SINGS_MAP),
                                 image: z.string().nullable(),
                                 score: z.number(),
+                                /**
+                                 * Whether today's reading for this person is already
+                                 * paid for. Here rather than on the person's own
+                                 * endpoint because this is the screen that prices them,
+                                 * and one read per person to draw one badge each is not
+                                 * a trade worth making.
+                                 */
+                                unlocked: z.boolean(),
                                 compatibility: z.any(),
                                 date: z.string(),
                                 baseCompatibility: z.any(),
@@ -145,8 +155,17 @@ export default (async (fastify) => {
 
                 const sortedPeople = (people as unknown as PersonWithScore[]).sort((a, b) => b.score - a.score);
 
+                const unlocked = await listUnlocked(fastify.db, {
+                    userId: session.user.id,
+                    feature: "compatibilityDetail",
+                    resourceKeys: sortedPeople.map((person) => creditKeys.compatibilityDetail(person.id, date)),
+                });
+
                 return reply.status(200).send({
-                    data: serializeDrizzleData(sortedPeople),
+                    data: serializeDrizzleData(sortedPeople).map((person) => ({
+                        ...person,
+                        unlocked: unlocked.has(creditKeys.compatibilityDetail(person.id, date)),
+                    })),
                 });
             } catch (error: unknown) {
                 const isDev = process.env.NODE_ENV !== "production";

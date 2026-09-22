@@ -15,9 +15,9 @@ import {
     transit,
 } from "../../db/schema";
 import { TransitAspects } from "../../utils/natalUtils";
-import { NatalChart, TransitChart } from "../astro";
+import { NatalChart, PLANETS, TransitChart } from "../astro";
 import { creditKeys } from "../credits/keys";
-import { refundUnlock } from "../credits/service";
+import { refundUnlock, refundUnlocks } from "../credits/service";
 import { computeTransits, utcOffsetForDate } from "../transits";
 import { DailyScoreResult } from "./types";
 
@@ -382,7 +382,7 @@ export function createStuckGenerationsJob(db: Db) {
                         lt(chatMessages.updatedAt, sql`now() - interval '5 minutes'`)
                     )
                 )
-                .returning({ id: chatMessages.id, userId: chatMessages.userId, chargeKey: chatMessages.chargeKey });
+                .returning({ id: chatMessages.id, userId: chatMessages.userId });
 
             /**
              * Give back what the timed-out runs cost.
@@ -394,7 +394,8 @@ export function createStuckGenerationsJob(db: Db) {
              * Compatibility rows are skipped: the unlock is keyed on the reader, and this
              * table only carries the person. The route's own failure path refunds those,
              * and the claim in the route takes a stale `pending` back on its own after
-             * the same timeout, so nothing is left stuck.
+             * the same timeout, so nothing is left stuck. Chat rows are skipped because
+             * a send costs nothing — it is behind the subscription, not the wallet.
              */
             const refunds: Promise<unknown>[] = [
                 ...insights.map((row) =>
@@ -411,22 +412,18 @@ export function createStuckGenerationsJob(db: Db) {
                         resourceKey: creditKeys.moonInsight(row.date),
                     })
                 ),
+                /**
+                 * Every planet of the day, because the panel is written once for whoever
+                 * opened the first of them and anyone who bought in while it ran paid for
+                 * the same stuck generation.
+                 */
                 ...planets.map((row) =>
-                    refundUnlock(db, {
+                    refundUnlocks(db, {
                         userId: row.userId,
                         feature: "planetInsight",
-                        resourceKey: creditKeys.planetInsight(row.date),
+                        resourceKeys: PLANETS.map((name) => creditKeys.planetInsight(name, row.date)),
                     })
                 ),
-                ...chat
-                    .filter((row) => row.chargeKey !== null)
-                    .map((row) =>
-                        refundUnlock(db, {
-                            userId: row.userId,
-                            feature: "chatMessage",
-                            resourceKey: creditKeys.chatMessage(row.chargeKey!),
-                        })
-                    ),
             ];
 
             const settled = await Promise.allSettled(refunds);

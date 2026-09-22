@@ -12,7 +12,7 @@ import { auth } from "../../lib/auth";
 import { touchLastActive } from "../../modules/activity";
 import { MOON_PHASES, PLANETS } from "../../modules/astro";
 import { creditKeys } from "../../modules/credits/keys";
-import { AccessState, checkAccess, spendCredits } from "../../modules/credits/service";
+import { AccessState, checkAccess, listUnlocked, spendCredits } from "../../modules/credits/service";
 import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyScore";
 import {
     backfillScoresForUser,
@@ -77,6 +77,13 @@ const responseSchema = z.object({
             z.object({
                 name: z.enum(PLANETS),
                 score: z.number(),
+                /**
+                 * Whether this planet's reading is already paid for today. Here rather
+                 * than on the planet's own endpoint because this is the screen that has
+                 * to price them: ten reads to draw ten badges is not a trade worth
+                 * making, and this response is already on screen.
+                 */
+                unlocked: z.boolean(),
                 aspects: z.array(
                     z.object({
                         /** "neptune_trine_moon" — the join key for the written half. */
@@ -180,6 +187,12 @@ async function buildResponse(
     const transitData = await getOrCreateTransits(db, date, input.profile.timezone);
     const score = scoreProfileForDate(input.profile, transitData.planets);
 
+    const unlockedPlanets = await listUnlocked(db, {
+        userId,
+        feature: "planetInsight",
+        resourceKeys: PLANETS.map((name) => creditKeys.planetInsight(name, date)),
+    });
+
     const timeline = await db
         .select({
             date: dailyInsights.date,
@@ -221,6 +234,7 @@ async function buildResponse(
         planets: summarizePlanetInfluence(score.impacts).map((weight) => ({
             name: weight.name,
             score: weight.score,
+            unlocked: unlockedPlanets.has(creditKeys.planetInsight(weight.name, date)),
             aspects: weight.contacts.map(toContactSummary),
         })),
     });

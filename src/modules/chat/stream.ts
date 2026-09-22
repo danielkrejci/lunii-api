@@ -153,8 +153,9 @@ export async function runChatGeneration(input: {
 
     const errorCode: ChatErrorCode = "generation_failed";
 
-    const failed = failure ? await failMessage(db, { messageId, claimedAt, errorCode, content: answer }) : null;
-    const stored = failure ? failed !== null : await completeMessage(db, { messageId, claimedAt, content: answer });
+    const stored = failure
+        ? await failMessage(db, { messageId, claimedAt, errorCode, content: answer })
+        : await completeMessage(db, { messageId, claimedAt, content: answer });
 
     if (!stored) {
         // Nothing matched: the row moved on while the model was writing. Worth saying

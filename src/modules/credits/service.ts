@@ -4,7 +4,7 @@ import { FastifyInstance } from "fastify";
 import { creditAccounts, creditLedger, creditUnlocks, subscriptions } from "../../db/schema";
 import { env } from "../../env";
 import { accruedBalance, advancedAnchor, project } from "./accrual";
-import { ALL_COSTS, costOf, CREDIT_PACK_CATALOGUE } from "./costs";
+import { ALL_COSTS, costOf, CREDIT_PACK_CATALOGUE, MAX_COMPATIBILITY_PEOPLE } from "./costs";
 import { CREDIT_CAP, CREDIT_REGEN_SECONDS, CreditFeature, CreditLedgerReason } from "./types";
 
 type Db = FastifyInstance["db"];
@@ -50,6 +50,11 @@ export interface CreditState {
     nextCreditAt: Date | null;
     fullAt: Date | null;
     costs: Record<CreditFeature, number>;
+    /**
+     * How many people may be saved. Not a price, but the same kind of number: decided
+     * here, sent with everything else the app draws limits from, and never compiled in.
+     */
+    maxCompatibilityPeople: number;
     /** Which store products are credit packs, and what each is worth. */
     packs: { productId: string; credits: number }[];
     subscription: {
@@ -171,6 +176,7 @@ export async function getCreditState(db: Db, userId: string): Promise<CreditStat
         nextCreditAt: unlimited ? null : projected.nextCreditAt,
         fullAt: unlimited ? null : projected.fullAt,
         costs: ALL_COSTS,
+        maxCompatibilityPeople: MAX_COMPATIBILITY_PEOPLE,
         packs: CREDIT_PACK_CATALOGUE,
         subscription: subscription ?? null,
     };
@@ -217,6 +223,45 @@ export async function checkAccess(
         balance: projected.balance,
         affordable: projected.balance >= cost,
     };
+}
+
+/**
+ * Which of these are already open, in one round trip.
+ *
+ * The bulk counterpart to `checkAccess`, for a screen that has to say what each of a
+ * list would cost — ten planets drawn side by side, each with its own unlock. Asking
+ * `checkAccess` per item would be ten subscription lookups and ten balance projections
+ * to answer a question that is one `IN` away.
+ *
+ * Deliberately narrower than `checkAccess`: it answers only "is this one paid for",
+ * because the price and the balance are the same for every item in such a list and the
+ * caller already has both.
+ */
+export async function listUnlocked(
+    db: Db,
+    input: { userId: string; feature: CreditFeature; resourceKeys: string[] }
+): Promise<Set<string>> {
+    if (input.resourceKeys.length === 0) {
+        return new Set();
+    }
+
+    // Everything is open, and saying so here keeps the caller free of the distinction.
+    if (!env.CREDITS_ENFORCED || (await hasActiveSubscription(db, input.userId))) {
+        return new Set(input.resourceKeys);
+    }
+
+    const rows = await db
+        .select({ resourceKey: creditUnlocks.resourceKey })
+        .from(creditUnlocks)
+        .where(
+            and(
+                eq(creditUnlocks.userId, input.userId),
+                eq(creditUnlocks.feature, input.feature),
+                inArray(creditUnlocks.resourceKey, input.resourceKeys)
+            )
+        );
+
+    return new Set(rows.map((row) => row.resourceKey));
 }
 
 /**
@@ -398,6 +443,35 @@ export async function refundUnlock(
 
         return revoked.creditsSpent;
     });
+}
+
+/**
+ * The same, for a purchase that was divided but generated whole.
+ *
+ * A day's planets are written in one request that any one of them may have paid for,
+ * and by the time it fails several more may have bought their way in. Refunding only
+ * the planet that triggered the generation would keep the rest's money for a text that
+ * never arrived, so the caller names every key the day could have been opened with and
+ * the ones nobody bought return nothing.
+ *
+ * Sequential rather than parallel: the pool is five connections wide and every refund
+ * opens a transaction, so ten at once is how a failed generation becomes an outage.
+ */
+export async function refundUnlocks(
+    db: Db,
+    input: { userId: string; feature: CreditFeature; resourceKeys: string[] }
+): Promise<number> {
+    let refunded = 0;
+
+    for (const resourceKey of input.resourceKeys) {
+        refunded += await refundUnlock(db, {
+            userId: input.userId,
+            feature: input.feature,
+            resourceKey,
+        });
+    }
+
+    return refunded;
 }
 
 /**

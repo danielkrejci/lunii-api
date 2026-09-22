@@ -35,6 +35,8 @@ const responseSchema = z.object({
         fullAt: z.string().nullable(),
         asOf: z.string(),
         costs: z.record(z.enum(CREDIT_FEATURES), z.number().int()),
+        /** The ceiling on saved people. The same for a subscriber as for anyone else. */
+        maxCompatibilityPeople: z.number().int(),
         /**
          * Which store products are credit packs, smallest first. The app shows only
          * these, so a yearly or lifetime subscription sitting in the same RevenueCat
@@ -212,6 +214,7 @@ export default (async (fastify) => {
                         fullAt: state.fullAt?.toISOString() ?? null,
                         asOf: new Date().toISOString(),
                         costs: state.costs,
+                        maxCompatibilityPeople: state.maxCompatibilityPeople,
                         packs: state.packs,
                         subscription: state.subscription
                             ? {

@@ -165,19 +165,6 @@ export const chatMessages = pgTable(
          */
         clientId: text("client_id"),
 
-        /**
-         * The send that paid for this answer — the reader's `client_id`, copied onto the
-         * assistant row.
-         *
-         * Not `client_id` itself: that column is unique per reader and is what makes a
-         * retried POST attach rather than ask twice. This is here so a failed answer can
-         * find the credit it cost and give it back, from the stream and from the sweeper
-         * alike. Overwritten by a retry, which pays again — so it always names the charge
-         * a refund should reverse. Null on a reader's own row, and on anything written
-         * before credits existed.
-         */
-        chargeKey: text("charge_key"),
-
         createdAt: timestamp("created_at").defaultNow().notNull(),
         updatedAt: timestamp("updated_at").defaultNow().notNull(),
     },

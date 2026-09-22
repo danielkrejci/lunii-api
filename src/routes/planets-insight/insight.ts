@@ -9,9 +9,9 @@ import { z } from "zod";
 
 import { aiGenerations, planetInsights, profile as profileTable } from "../../db/schema";
 import { auth } from "../../lib/auth";
-import { PLANETS } from "../../modules/astro";
+import { Planet, PLANETS } from "../../modules/astro";
 import { creditKeys } from "../../modules/credits/keys";
-import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../modules/credits/service";
+import { AccessState, checkAccess, refundUnlocks, spendCredits } from "../../modules/credits/service";
 import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyScore";
 import { getOrCreateTransits, scoreProfileForDate } from "../../modules/dailyScore/service";
 import { GenerationStatus } from "../../modules/insights";
@@ -263,15 +263,20 @@ async function generate(
             .returning({ date: planetInsights.date });
 
         /**
-         * Give the credits back, and revoke the unlock with them. Guarded on the update
-         * having matched, so only the run that owned this row refunds; `refundUnlock`
-         * deletes and returns exactly once, so the sweeper racing it gives back nothing.
+         * Give the credits back, and revoke the unlocks with them. Every planet, not
+         * just the one that started this: the panel is written once for whoever opened
+         * it first, and anyone who bought their way in while it was running paid for
+         * the same text that never arrived.
+         *
+         * Guarded on the update having matched, so only the run that owned this row
+         * refunds; `refundUnlock` deletes and returns exactly once, so the sweeper
+         * racing it gives back nothing.
          */
         if (failed.length > 0) {
-            await refundUnlock(fastify.db, {
+            await refundUnlocks(fastify.db, {
                 userId,
                 feature: "planetInsight",
-                resourceKey: creditKeys.planetInsight(date),
+                resourceKeys: PLANETS.map((name) => creditKeys.planetInsight(name, date)),
             }).catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Failed to refund credits"));
         }
     })().catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Planet generation crashed"));
@@ -285,7 +290,14 @@ async function generate(
  */
 async function buildResponse(
     db: FastifyInstance["db"],
-    input: { userId: string; profile: typeof profileTable.$inferSelect; date: string; access: AccessState }
+    input: {
+        userId: string;
+        profile: typeof profileTable.$inferSelect;
+        date: string;
+        /** Which planet was asked for. Only its written half is paid for, and returned. */
+        planet: Planet;
+        access: AccessState;
+    }
 ): Promise<ResponseData> {
     const { date, userId } = input;
 
@@ -308,31 +320,41 @@ async function buildResponse(
             aspects: weight.contacts.map(toContactSummary),
         })),
         access: input.access,
-        content: describeContent(stored, input.access),
+        content: describeContent(stored, input.access, input.planet),
     };
 }
 
 /**
- * How the written half is reported.
+ * How the written half is reported, for the one planet that was asked for.
  *
- * One row holds every planet for a day, so one unlock opens the whole panel rather than
- * a planet at a time. Order matters: `locked` is checked before `failed`, because a
- * failed generation was refunded and its unlock revoked, and reporting the stale failure
- * would offer a retry that silently costs money.
+ * One row holds every planet for a day, but an unlock opens a single one of them, so a
+ * written panel is still `locked` to a reader who has not paid for this planet — and
+ * the text of the others never leaves the server. The filter is the enforcement, not a
+ * convenience for the client.
+ *
+ * Order matters: `locked` comes first now, because a day can be written and unsold at
+ * the same time, and it still comes before `failed`, because a failed generation was
+ * refunded and its unlocks revoked — reporting the stale failure would offer a retry
+ * that silently costs money.
  *
  * `absent` is reported as pending — the read claims the generation for anyone entitled
  * to it, so the client never has to know that state exists.
  */
 function describeContent(
     stored: { content: PlanetInsightContent | null; status: GenerationStatus } | undefined,
-    access: AccessState
+    access: AccessState,
+    planet: Planet
 ): ResponseData["content"] {
-    if (stored?.status === "ready" && stored.content) {
-        return { status: "ready", data: stored.content, error: null };
-    }
-
     if (!access.unlocked) {
         return { status: "locked", data: null, error: null };
+    }
+
+    if (stored?.status === "ready" && stored.content) {
+        return {
+            status: "ready",
+            data: { planets: stored.content.planets.filter((item) => item.name === planet) },
+            error: null,
+        };
     }
 
     if (stored?.status === "failed") {
@@ -383,6 +405,11 @@ export default (async (fastify) => {
             schema: {
                 querystring: z.object({
                     date: z.string().refine((val) => dayjs.utc(val).isValid(), { message: "Invalid date format" }),
+                    /**
+                     * Required, because the answer depends on it: this is one planet's
+                     * reading and one planet's price, not the day's.
+                     */
+                    planet: z.enum(PLANETS),
                 }),
                 response: { 200: responseSchema, 401: errorSchema, 409: errorSchema, 500: errorSchema },
             },
@@ -404,17 +431,19 @@ export default (async (fastify) => {
 
             try {
                 const date = dayjs.utc(request.query.date).format("YYYY-MM-DD");
+                const planet = request.query.planet;
 
                 const access = await checkAccess(fastify.db, {
                     userId: session.user.id,
                     feature: "planetInsight",
-                    resourceKey: creditKeys.planetInsight(date),
+                    resourceKey: creditKeys.planetInsight(planet, date),
                 });
 
                 const data = await buildResponse(fastify.db, {
                     userId: session.user.id,
                     profile: session.profile,
                     date,
+                    planet,
                     access,
                 });
 
@@ -460,13 +489,17 @@ export default (async (fastify) => {
         {
             /**
              * The only endpoint here that spends money on demand, and there is no attempts
-             * counter behind it. Three an hour covers a real failure the user wants to
-             * retry, and stops a stuck day from being retried into a bill.
+             * counter behind it. It is now the ordinary way a planet is bought rather
+             * than only a retry, so the ceiling has to clear ten planets plus a few
+             * retries in a day — while still stopping a stuck day from being retried
+             * into a bill.
              */
-            config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
+            config: { rateLimit: { max: 20, timeWindow: "1 hour" } },
             schema: {
                 body: z.object({
                     date: z.string().refine((val) => dayjs.utc(val).isValid(), { message: "Invalid date format" }),
+                    /** Which planet is being bought. The generation is still the day's. */
+                    planet: z.enum(PLANETS),
                 }),
                 response: {
                     202: responseSchema,
@@ -494,6 +527,7 @@ export default (async (fastify) => {
 
             try {
                 const date = dayjs.utc(request.body.date).format("YYYY-MM-DD");
+                const planet = request.body.planet;
 
                 // The client may retry a day it has never read, and the claim below can
                 // only update a row that is already there. Just the row: this used to
@@ -503,13 +537,14 @@ export default (async (fastify) => {
 
                 /**
                  * The purchase. This endpoint is both the unlock and the retry, and the
-                 * unlock row is what tells them apart: a reader who already owns the day
-                 * is charged nothing, so retrying something they paid for is free.
+                 * unlock row is what tells them apart: a reader who already owns this
+                 * planet is charged nothing, so re-opening it, or retrying a generation
+                 * they paid for, is free.
                  */
                 const spend = await spendCredits(fastify.db, {
                     userId: session.user.id,
                     feature: "planetInsight",
-                    resourceKey: creditKeys.planetInsight(date),
+                    resourceKey: creditKeys.planetInsight(planet, date),
                 });
 
                 if (!spend.ok) {
@@ -529,9 +564,14 @@ export default (async (fastify) => {
                 }
 
                 /**
-                 * Retry after a failure — the one path allowed to claim a `failed` day.
-                 * Claimed before the response is built, so the client is told `pending`
-                 * and starts polling instead of reading back the failure it just retried.
+                 * Starts the day's panel, or retries it — the one path allowed to claim a
+                 * `failed` day. Claimed before the response is built, so the client is
+                 * told `pending` and starts polling instead of reading back the failure
+                 * it just retried.
+                 *
+                 * A no-op for the second planet bought today: the claim only fires while
+                 * the day has no content, so the rest of the panel is already written and
+                 * this reader simply gets to see their part of it.
                  */
                 await generate(fastify, {
                     userId: session.user.id,
@@ -544,10 +584,11 @@ export default (async (fastify) => {
                     userId: session.user.id,
                     profile: session.profile,
                     date,
+                    planet,
                     access: await checkAccess(fastify.db, {
                         userId: session.user.id,
                         feature: "planetInsight",
-                        resourceKey: creditKeys.planetInsight(date),
+                        resourceKey: creditKeys.planetInsight(planet, date),
                     }),
                 });
 

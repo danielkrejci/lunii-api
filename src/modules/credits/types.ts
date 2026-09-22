@@ -12,23 +12,16 @@
 /**
  * Everything that can be bought with credits.
  *
- * `chatMessage` sits here with the rest even though nothing "unlocks" for a reader to
- * come back to. A paid send is still a one-time purchase keyed by the client's own id,
- * and treating it exactly like the others is what makes a retried POST — a dropped
- * socket, a backgrounded app — free rather than charged twice.
+ * Chat is not here, and deliberately: it is behind the subscription outright, and a
+ * subscriber has nothing to count. There is no such thing as a chat send bought with
+ * credits, so there is no feature for one.
  */
 export const CREDIT_FEATURES = [
     "dailyInsight",
     "moonInsight",
     "planetInsight",
     "compatibilityDetail",
-    /**
-     * Adding a person, not reading about them. The first purchase here that buys a thing
-     * rather than a text — which is why it is keyed on the person and not on a date: it
-     * is paid once, when they are created, and never again while they exist.
-     */
     "compatibilityPerson",
-    "chatMessage",
 ] as const;
 
 export type CreditFeature = (typeof CREDIT_FEATURES)[number];

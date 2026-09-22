@@ -414,7 +414,6 @@ export default (async (fastify) => {
                     userId: reader.userId,
                     conversationId: request.body.conversationId,
                     messageId: request.body.messageId,
-                    chargeKey: request.body.clientId,
                 });
 
                 if (!claimed) {

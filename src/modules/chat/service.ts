@@ -101,10 +101,6 @@ export async function startTurn(
     db: Db,
     input: { userId: string; conversationId: string | null; content: string; clientId: string }
 ): Promise<StartedTurn | null> {
-    // The send that paid for this turn. The same id the debit is keyed on, so a failed
-    // answer can find the credit it cost — see `chat_messages.charge_key`.
-    const chargeKey = input.clientId;
-
     const { userId, clientId } = input;
     const content = input.content.trim();
 
@@ -240,7 +236,6 @@ export async function startTurn(
                 role: "assistant",
                 content: "",
                 status: "streaming",
-                chargeKey,
                 // The claim, set explicitly so it is millisecond-precise from the start.
                 updatedAt: nowToMillisecond,
             })
@@ -338,7 +333,7 @@ export async function completeMessage(
 export async function failMessage(
     db: Db,
     input: { messageId: string; claimedAt: Date; errorCode: ChatErrorCode; content: string }
-): Promise<{ chargeKey: string | null } | null> {
+): Promise<boolean> {
     const [written] = await db
         .update(chatMessages)
         .set({
@@ -349,13 +344,12 @@ export async function failMessage(
         })
         .where(and(eq(chatMessages.id, input.messageId), eq(chatMessages.updatedAt, input.claimedAt)))
         /**
-         * The charge comes back with the failure so the caller can give it back. Only
-         * the run that actually owned this row gets a row here, which is what stops the
-         * sweeper and a dying run refunding the same send twice.
+         * Only the run that actually owned this row gets a row back, which is what tells
+         * a dying run from the sweeper arriving after it.
          */
-        .returning({ chargeKey: chatMessages.chargeKey });
+        .returning({ id: chatMessages.id });
 
-    return written ?? null;
+    return written !== undefined;
 }
 
 /**
@@ -370,20 +364,14 @@ export async function failMessage(
  */
 export async function claimRetry(
     db: Db,
-    input: { userId: string; conversationId: string; messageId: string; chargeKey: string }
+    input: { userId: string; conversationId: string; messageId: string }
 ): Promise<{ claimedAt: Date } | null> {
     const [claimed] = await db
         .update(chatMessages)
-        /**
-         * The charge key is overwritten, not kept. A retry is paid for in its own right,
-         * so the row must name the charge a refund would reverse — which is this
-         * attempt's, not the one that already failed and was already given back.
-         */
         .set({
             status: "streaming",
             content: "",
             errorCode: null,
-            chargeKey: input.chargeKey,
             updatedAt: nowToMillisecond,
         })
         .where(

@@ -14,11 +14,9 @@ import { CREDIT_FEATURES, CreditFeature } from "./types";
 export const CREDIT_COSTS = {
     dailyInsight: 5,
     moonInsight: 5,
-    planetInsight: 1,
+    planetInsight: 2,
     compatibilityDetail: 5,
-    /** Paid once when a person is added. Reading about them afterwards is the 5 above. */
     compatibilityPerson: 10,
-    chatMessage: 1,
 } as const satisfies Record<CreditFeature, number>;
 
 /**
@@ -27,7 +25,7 @@ export const CREDIT_COSTS = {
  * The same for everyone, subscriber or not. It is a cap on our own cost as much as a
  * product decision: every saved person is another reading written for them each day.
  */
-export const MAX_COMPATIBILITY_PEOPLE = 10;
+export const MAX_COMPATIBILITY_PEOPLE = 8;
 
 /**
  * What a consumable pack is worth, by App Store product id.
