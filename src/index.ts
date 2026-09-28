@@ -26,6 +26,7 @@ import {
     ZodTypeProvider,
 } from "fastify-type-provider-zod";
 
+import { env } from "./env";
 import { MAX_IMAGE_SIZE } from "./lib/r2";
 import {
     createDailyScoresJob,
@@ -157,23 +158,25 @@ fastify.ready(async (err) => {
         process.exit(1);
     }
 
-    // create transit job
-    const job = createTransitJob(fastify.db);
+    if (env.ENABLE_CRON_JOBS === true) {
+        // create transit job
+        const job = createTransitJob(fastify.db);
 
-    // add cron jobs
-    fastify.scheduler.addCronJob(job);
-    fastify.scheduler.addCronJob(createDailyScoresJob(fastify.db));
-    fastify.scheduler.addCronJob(createStuckGenerationsJob(fastify.db));
+        // add cron jobs
+        fastify.scheduler.addCronJob(job);
+        fastify.scheduler.addCronJob(createDailyScoresJob(fastify.db));
+        fastify.scheduler.addCronJob(createStuckGenerationsJob(fastify.db));
 
-    /*
-     * Pre-generation of the horoscope: submit two days ahead, collect whatever Gemini
-     * has finished, and close the run six hours before the day begins anywhere. Separate
-     * jobs rather than one, because they run on completely different cadences and a
-     * failure in any of them must not stop the others.
-     */
-    fastify.scheduler.addCronJob(createDailyInsightBatchJob(fastify));
-    fastify.scheduler.addCronJob(createBatchCollectJob(fastify));
-    fastify.scheduler.addCronJob(createBatchCutoffJob(fastify));
+        /*
+         * Pre-generation of the horoscope: submit two days ahead, collect whatever Gemini
+         * has finished, and close the run six hours before the day begins anywhere. Separate
+         * jobs rather than one, because they run on completely different cadences and a
+         * failure in any of them must not stop the others.
+         */
+        fastify.scheduler.addCronJob(createDailyInsightBatchJob(fastify));
+        fastify.scheduler.addCronJob(createBatchCollectJob(fastify));
+        fastify.scheduler.addCronJob(createBatchCutoffJob(fastify));
+    }
 
     // immediate run: transits first, then tomorrow's scores for everyone
     await executeTransitsGeneration(fastify.db);
