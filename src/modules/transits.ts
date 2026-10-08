@@ -2,9 +2,10 @@ import dayjs from "dayjs";
 import timezonePlugin from "dayjs/plugin/timezone.js";
 import utc from "dayjs/plugin/utc.js";
 import { FastifyInstance } from "fastify";
-import { AsyncTask, CronJob } from "toad-scheduler";
+import { CronJob } from "toad-scheduler";
 
 import { profile, transit } from "../db/schema";
+import { shutdownAwareTask } from "../lib/backgroundTasks";
 import {
     getAngleDiff,
     getAspect,
@@ -125,7 +126,7 @@ export async function executeTransitsGeneration(db: FastifyInstance["db"]) {
 }
 
 export function createTransitJob(db: FastifyInstance["db"]) {
-    const task = new AsyncTask(
+    const task = shutdownAwareTask(
         "generate-transits",
         async () => {
             await executeTransitsGeneration(db);

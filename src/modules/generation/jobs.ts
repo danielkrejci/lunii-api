@@ -1,7 +1,8 @@
 import dayjs from "dayjs";
 import { FastifyInstance } from "fastify";
-import { AsyncTask, CronJob } from "toad-scheduler";
+import { CronJob } from "toad-scheduler";
 
+import { shutdownAwareTask } from "../../lib/backgroundTasks";
 import { BatchAdapter, closeRuns, collectBatches, submitBatch } from "./batchRunner";
 import { groupZonesByOffset, shardKeyFor } from "./cohorts";
 import { BATCH_MODEL, dailyInsightAdapter } from "./insightAdapters";
@@ -39,7 +40,7 @@ function targetDate(daysAhead: number): string {
 }
 
 function cron(fastify: FastifyInstance, name: string, expression: string, run: () => Promise<void>) {
-    const task = new AsyncTask(name, run, (err) => {
+    const task = shutdownAwareTask(name, run, (err) => {
         fastify.log.error({ err }, `[CRON ERROR] ${name}`);
     });
 

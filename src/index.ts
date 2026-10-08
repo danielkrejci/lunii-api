@@ -17,6 +17,7 @@ import timezone from "dayjs/plugin/timezone";
 import updateLocale from "dayjs/plugin/updateLocale";
 import utc from "dayjs/plugin/utc";
 import weekOfYear from "dayjs/plugin/weekOfYear";
+import { sql } from "drizzle-orm";
 import Fastify from "fastify";
 import {
     hasZodFastifySchemaValidationErrors,
@@ -27,6 +28,7 @@ import {
 } from "fastify-type-provider-zod";
 
 import { env } from "./env";
+import { beginShutdown, runInBackground, runningBackgroundTasks } from "./lib/backgroundTasks";
 import { MAX_IMAGE_SIZE } from "./lib/r2";
 import {
     createDailyScoresJob,
@@ -183,39 +185,116 @@ fastify.get("/", (_, reply) => {
     reply.redirect("https://getlunii.com");
 });
 
-fastify.ready(async (err) => {
-    if (err) {
-        console.error("Fastify failed to load:", err);
+/**
+ * What App Platform asks before it sends traffic to a new instance. Outside `/api`, no
+ * session and no rate limit; the one query proves the pool can reach the database. While
+ * the server is closing Fastify answers 503 before this runs, which is the point.
+ */
+const HEALTH_DB_TIMEOUT_MS = 2_000;
+
+fastify.get("/health", async (request, reply) => {
+    let timer: NodeJS.Timeout | undefined;
+
+    try {
+        await Promise.race([
+            fastify.db.execute(sql`select 1`),
+            new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("Database ping timed out")), HEALTH_DB_TIMEOUT_MS);
+            }),
+        ]);
+
+        return reply.status(200).send({ status: "ok" });
+    } catch (error: unknown) {
+        request.log.error({ err: error }, "Health check failed");
+
+        return reply.status(503).send({ status: "unavailable" });
+    } finally {
+        clearTimeout(timer);
+    }
+});
+
+/**
+ * Awaited rather than passed a callback: `ready(cb)` does not wait for an async callback,
+ * so a throw in it was an unhandled rejection that took the process down.
+ */
+try {
+    await fastify.ready();
+} catch (err) {
+    console.error("Fastify failed to load:", err);
+    process.exit(1);
+}
+
+if (env.ENABLE_CRON_JOBS === true) {
+    // create transit job
+    const job = createTransitJob(fastify.db);
+
+    // add cron jobs
+    fastify.scheduler.addCronJob(job);
+    fastify.scheduler.addCronJob(createDailyScoresJob(fastify.db));
+    fastify.scheduler.addCronJob(createStuckGenerationsJob(fastify.db));
+
+    /*
+     * Pre-generation of the horoscope: submit two days ahead, collect whatever Gemini
+     * has finished, and close the run six hours before the day begins anywhere. Separate
+     * jobs rather than one, because they run on completely different cadences and a
+     * failure in any of them must not stop the others.
+     */
+    fastify.scheduler.addCronJob(createDailyInsightBatchJob(fastify));
+    fastify.scheduler.addCronJob(createBatchCollectJob(fastify));
+    fastify.scheduler.addCronJob(createBatchCutoffJob(fastify));
+
+    /**
+     * Immediate run: transits first, then tomorrow's scores for everyone. In the
+     * background, so the instance takes traffic straight away; both are idempotent,
+     * and a shutdown waits for them like any other background work.
+     */
+    runInBackground(
+        async () => {
+            await executeTransitsGeneration(fastify.db);
+            await executeDailyScoresGeneration(fastify.db);
+        },
+        (error: unknown) => fastify.log.error({ err: error }, "Startup generation failed")
+    );
+}
+
+// print available routes
+console.log(fastify.printRoutes());
+
+/**
+ * Graceful shutdown. App Platform deploys by moving traffic to the new instance and
+ * then sending this one SIGTERM, so by now nothing new is routed here.
+ *
+ * `close()` stops taking requests (503), waits for the ones in flight — chat streams
+ * included — then the db plugin waits for background generations before ending the
+ * pool. The timer is the backstop for anything that hangs; it fires before the platform's
+ * grace period (150 s) runs out and kills the process anyway. A second signal skips the
+ * wait: `once` has removed the handler, so Node's default applies.
+ */
+const SHUTDOWN_TIMEOUT_MS = 140_000;
+
+async function shutdown(signal: NodeJS.Signals) {
+    fastify.log.info({ signal, backgroundTasks: runningBackgroundTasks() }, "Shutting down...");
+
+    beginShutdown();
+
+    setTimeout(() => {
+        fastify.log.error("Shutdown timed out, exiting");
+        process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS).unref();
+
+    try {
+        await fastify.close();
+
+        fastify.log.info("Shutdown complete.");
+        process.exit(0);
+    } catch (error: unknown) {
+        fastify.log.error({ err: error }, "Shutdown failed");
         process.exit(1);
     }
+}
 
-    if (env.ENABLE_CRON_JOBS === true) {
-        // create transit job
-        const job = createTransitJob(fastify.db);
-
-        // add cron jobs
-        fastify.scheduler.addCronJob(job);
-        fastify.scheduler.addCronJob(createDailyScoresJob(fastify.db));
-        fastify.scheduler.addCronJob(createStuckGenerationsJob(fastify.db));
-
-        /*
-         * Pre-generation of the horoscope: submit two days ahead, collect whatever Gemini
-         * has finished, and close the run six hours before the day begins anywhere. Separate
-         * jobs rather than one, because they run on completely different cadences and a
-         * failure in any of them must not stop the others.
-         */
-        fastify.scheduler.addCronJob(createDailyInsightBatchJob(fastify));
-        fastify.scheduler.addCronJob(createBatchCollectJob(fastify));
-        fastify.scheduler.addCronJob(createBatchCutoffJob(fastify));
-
-        // immediate run: transits first, then tomorrow's scores for everyone
-        await executeTransitsGeneration(fastify.db);
-        await executeDailyScoresGeneration(fastify.db);
-    }
-
-    // print available routes
-    console.log(fastify.printRoutes());
-});
+process.once("SIGTERM", (signal) => void shutdown(signal));
+process.once("SIGINT", (signal) => void shutdown(signal));
 
 try {
     await fastify.listen({ port: Number(process.env.PORT || 3000), host: "0.0.0.0" });

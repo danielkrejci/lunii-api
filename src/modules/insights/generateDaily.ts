@@ -2,6 +2,7 @@ import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
 import { FastifyInstance } from "fastify";
 
 import { aiGenerations, dailyInsights, profile as profileTable } from "../../db/schema";
+import { runInBackground } from "../../lib/backgroundTasks";
 import { creditKeys } from "../credits/keys";
 import { refundUnlock } from "../credits/service";
 import { getOrCreateTransits, scoreProfileForDate } from "../dailyScore/service";
@@ -86,94 +87,99 @@ export async function startDailyInsightGeneration(
      * whose row has been touched since (a language change, or a timeout and a new claim)
      * must not overwrite what replaced it.
      */
-    void (async () => {
-        const owned = and(
-            eq(dailyInsights.userId, userId),
-            eq(dailyInsights.date, date),
-            eq(dailyInsights.updatedAt, claimed.updatedAt)
-        );
+    runInBackground(
+        async () => {
+            const owned = and(
+                eq(dailyInsights.userId, userId),
+                eq(dailyInsights.date, date),
+                eq(dailyInsights.updatedAt, claimed.updatedAt)
+            );
 
-        const transitData = await getOrCreateTransits(fastify.db, date, input.profile.timezone);
-        const score = scoreProfileForDate(input.profile, transitData.planets);
+            const transitData = await getOrCreateTransits(fastify.db, date, input.profile.timezone);
+            const score = scoreProfileForDate(input.profile, transitData.planets);
 
-        // One retry, because most failures here are a timeout or a rate limit rather
-        // than anything a second attempt would hit again.
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            const { content, usage } = await generateDailyInsight({
-                transits: {
-                    planets: transitData.planets as DailyTransits["planets"],
-                    aspects: transitData.aspects as DailyTransits["aspects"],
-                },
-                score,
-                // The stored row satisfies Reader structurally, so nothing has to be
-                // picked apart here and forgotten when a field is added.
-                reader: input.profile,
-                languageIso: input.profile.language,
-            });
+            // One retry, because most failures here are a timeout or a rate limit rather
+            // than anything a second attempt would hit again.
+            for (let attempt = 1; attempt <= 2; attempt++) {
+                const { content, usage } = await generateDailyInsight({
+                    transits: {
+                        planets: transitData.planets as DailyTransits["planets"],
+                        aspects: transitData.aspects as DailyTransits["aspects"],
+                    },
+                    score,
+                    // The stored row satisfies Reader structurally, so nothing has to be
+                    // picked apart here and forgotten when a field is added.
+                    reader: input.profile,
+                    languageIso: input.profile.language,
+                });
 
-            // The audit row is the only place the prompt, the answer and the price
-            // survive, and it must never be the reason a finished horoscope is lost.
-            await fastify.db
-                .insert(aiGenerations)
-                .values({
-                    userId,
-                    type: "dailyInsight",
-                    status: content ? "success" : "error",
-                    error: usage.error,
-                    requestId: usage.requestId,
-                    provider: usage.provider,
-                    model: usage.model,
-                    input: usage.input,
-                    output: usage.output,
-                    inputTokens: usage.inputTokens,
-                    outputTokens: usage.outputTokens,
-                    total_tokens: usage.totalTokens,
-                    latencyMs: usage.latencyMs,
-                    cost: usage.cost,
-                })
-                .catch((error: unknown) =>
-                    fastify.log.error({ err: error, userId, date }, "Failed to log AI generation")
-                );
+                // The audit row is the only place the prompt, the answer and the price
+                // survive, and it must never be the reason a finished horoscope is lost.
+                await fastify.db
+                    .insert(aiGenerations)
+                    .values({
+                        userId,
+                        type: "dailyInsight",
+                        status: content ? "success" : "error",
+                        error: usage.error,
+                        requestId: usage.requestId,
+                        provider: usage.provider,
+                        model: usage.model,
+                        input: usage.input,
+                        output: usage.output,
+                        inputTokens: usage.inputTokens,
+                        outputTokens: usage.outputTokens,
+                        total_tokens: usage.totalTokens,
+                        latencyMs: usage.latencyMs,
+                        cost: usage.cost,
+                    })
+                    .catch((error: unknown) =>
+                        fastify.log.error({ err: error, userId, date }, "Failed to log AI generation")
+                    );
 
-            if (content) {
-                const written = await fastify.db
-                    .update(dailyInsights)
-                    .set({ content, status: "ready", updatedAt: sql`date_trunc('milliseconds', now())` })
-                    .where(owned)
-                    .returning({ date: dailyInsights.date });
+                if (content) {
+                    const written = await fastify.db
+                        .update(dailyInsights)
+                        .set({ content, status: "ready", updatedAt: sql`date_trunc('milliseconds', now())` })
+                        .where(owned)
+                        .returning({ date: dailyInsights.date });
 
-                // Nothing matched: the row moved on while the model was writing. Worth
-                // saying out loud — the horoscope was paid for and then thrown away.
-                if (written.length === 0) {
-                    fastify.log.warn({ userId, date }, "Generated insight discarded, the row had moved on");
+                    // Nothing matched: the row moved on while the model was writing. Worth
+                    // saying out loud — the horoscope was paid for and then thrown away.
+                    if (written.length === 0) {
+                        fastify.log.warn({ userId, date }, "Generated insight discarded, the row had moved on");
+                    }
+
+                    return;
                 }
-
-                return;
             }
-        }
 
-        const failed = await fastify.db
-            .update(dailyInsights)
-            .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
-            .where(owned)
-            .returning({ date: dailyInsights.date });
+            const failed = await fastify.db
+                .update(dailyInsights)
+                .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
+                .where(owned)
+                .returning({ date: dailyInsights.date });
 
-        /**
-         * Give the credits back, and revoke the unlock with them.
-         *
-         * Guarded on the update having matched, so only the run that actually owned this
-         * row refunds — the sweeper racing the same failure finds nothing to give back,
-         * because `refundUnlock` deletes and returns exactly once.
-         *
-         * Revoking is safe against this run's own late writes: every one of them carries
-         * the claimed timestamp, and the update above has already moved it.
-         */
-        if (failed.length > 0) {
-            await refundUnlock(fastify.db, {
-                userId,
-                feature: "dailyInsight",
-                resourceKey: creditKeys.dailyInsight(date),
-            }).catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Failed to refund credits"));
-        }
-    })().catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Generation crashed"));
+            /**
+             * Give the credits back, and revoke the unlock with them.
+             *
+             * Guarded on the update having matched, so only the run that actually owned this
+             * row refunds — the sweeper racing the same failure finds nothing to give back,
+             * because `refundUnlock` deletes and returns exactly once.
+             *
+             * Revoking is safe against this run's own late writes: every one of them carries
+             * the claimed timestamp, and the update above has already moved it.
+             */
+            if (failed.length > 0) {
+                await refundUnlock(fastify.db, {
+                    userId,
+                    feature: "dailyInsight",
+                    resourceKey: creditKeys.dailyInsight(date),
+                }).catch((error: unknown) =>
+                    fastify.log.error({ err: error, userId, date }, "Failed to refund credits")
+                );
+            }
+        },
+        (error: unknown) => fastify.log.error({ err: error, userId, date }, "Generation crashed")
+    );
 }

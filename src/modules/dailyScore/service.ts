@@ -2,7 +2,7 @@ import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
 import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { FastifyInstance } from "fastify";
-import { AsyncTask, CronJob } from "toad-scheduler";
+import { CronJob } from "toad-scheduler";
 
 import { calculateDailyScore } from ".";
 import {
@@ -14,6 +14,7 @@ import {
     profile as profileTable,
     transit,
 } from "../../db/schema";
+import { shutdownAwareTask } from "../../lib/backgroundTasks";
 import { TransitAspects } from "../../utils/natalUtils";
 import { NatalChart, PLANETS, TransitChart } from "../astro";
 import { creditKeys } from "../credits/keys";
@@ -307,7 +308,7 @@ export async function executeDailyScoresGeneration(db: Db): Promise<void> {
  * polling a day nobody is generating and gets an error it can retry instead.
  */
 export function createStuckGenerationsJob(db: Db) {
-    const task = new AsyncTask(
+    const task = shutdownAwareTask(
         "fail-stuck-generations",
         async () => {
             const insights = await db
@@ -449,7 +450,7 @@ export function createStuckGenerationsJob(db: Db) {
 }
 
 export function createDailyScoresJob(db: Db) {
-    const task = new AsyncTask(
+    const task = shutdownAwareTask(
         "generate-daily-scores",
         async () => {
             await executeDailyScoresGeneration(db);
