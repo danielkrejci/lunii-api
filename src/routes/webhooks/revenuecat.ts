@@ -127,7 +127,7 @@ export default (async (fastify) => {
                 request.log.error({ err: error, eventId: event.id }, "Failed to apply a RevenueCat event");
 
                 return reply.status(500).send({
-                    error: { code: "error", message: "Failed to apply the event." },
+                    error: { code: "internal_error", message: "Failed to apply the event." },
                 });
             }
         }

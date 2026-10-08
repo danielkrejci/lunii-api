@@ -24,6 +24,8 @@ import { openSseChannel } from "../../modules/chat/sse";
 import { runChatGeneration } from "../../modules/chat/stream";
 import { MAX_MESSAGE_LENGTH } from "../../modules/chat/types";
 import { hasActiveSubscription } from "../../modules/credits/service";
+import { sendInternalError } from "../../utils/errors";
+import { errorResponseBuilder } from "../../utils/rateLimitResponse";
 
 dayjs.extend(utc);
 
@@ -55,11 +57,8 @@ const retrySchema = z.object({
     conversationId: z.string(),
     messageId: z.string(),
     /**
-     * A fresh id for each press of retry, and the key this attempt is charged on.
-     *
-     * A retry is a paid generation in its own right, so it needs its own idempotency
-     * key: reusing the original send's would make every retry free, and having none at
-     * all would charge twice for one press when a flaky network repeats the POST.
+     * A fresh id for each press of retry. Accepted but not read: a repeated POST is
+     * already stopped by `claimRetry`, which only one request can win per failure.
      */
     clientId: z.string(),
     date: dateSchema,
@@ -201,20 +200,31 @@ export default (async (fastify) => {
 
             return session?.user?.id ?? request.ip;
         },
-        errorResponseBuilder: (_request, context) => {
-            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
-
-            return {
-                statusCode: 429,
-                error: {
-                    hours: Math.floor(totalSeconds / 3600),
-                    minutes: Math.floor((totalSeconds % 3600) / 60),
-                    message: "You've reached the limit for now. Please try again later.",
-                    silent: true,
-                },
-            };
-        },
+        errorResponseBuilder,
     });
+
+    /**
+     * The daily ceiling on sending, a second limiter beside the hourly one in the route
+     * config. Checked by hand because the plugin runs only one of its own limiters per
+     * request — a second `fastify.rateLimit()` hook would be skipped. As a `preHandler`
+     * it runs after the hourly one, so requests that one refused are not counted here.
+     */
+    const dailyLimit = fastify.createRateLimit({ max: 240, timeWindow: "1 day" });
+
+    async function checkDailyLimit(request: FastifyRequest) {
+        const limit = await dailyLimit(request);
+
+        if (!limit.isAllowed && limit.isExceeded) {
+            // Thrown the way the plugin throws its own, so the error handler answers both alike.
+            throw errorResponseBuilder(request, {
+                statusCode: 429,
+                ban: false,
+                after: `${limit.ttlInSeconds} seconds`,
+                max: limit.max,
+                ttl: limit.ttl,
+            });
+        }
+    }
 
     /* ============================================================
        SEND — opens a thread if it has to, then streams the answer
@@ -223,7 +233,13 @@ export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/messages",
         {
-            config: { rateLimit: { max: 40, timeWindow: "1 hour" } },
+            /**
+             * Nothing here spends credits, so the limits are the ceiling on what one
+             * reader costs in model calls. A hundred and twenty an hour does not get in
+             * the way of a real conversation, and the day is capped at twice that.
+             */
+            config: { rateLimit: { max: 120, timeWindow: "1 hour" } },
+            preHandler: checkDailyLimit,
             schema: {
                 body: sendSchema,
                 // No `response`: this hijacks the reply, and the serializer must not
@@ -340,23 +356,13 @@ export default (async (fastify) => {
                     contents,
                 });
             } catch (error: unknown) {
-                request.log.error({ err: error }, "Failed to start a chat turn");
-
                 // Only reachable while the reply is still ours; everything after
                 // `openSseChannel` reports through the stream instead.
                 if (!reply.raw.headersSent) {
-                    const isDev = process.env.NODE_ENV !== "production";
-
-                    return reply.status(500).send({
-                        error: {
-                            code: "error",
-                            message:
-                                isDev && error instanceof Error
-                                    ? (error.stack ?? error.message)
-                                    : "Internal Server Error",
-                        },
-                    });
+                    return sendInternalError(request, reply, error, "Failed to start a chat turn");
                 }
+
+                request.log.error({ err: error }, "Failed to start a chat turn");
             }
         }
     );
@@ -368,7 +374,11 @@ export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/messages/retry",
         {
-            config: { rateLimit: { max: 40, timeWindow: "1 hour" } },
+            /**
+             * Only a `failed` answer can be retried, and only once per failure, so a
+             * reader who needs more than this is looking at a broken backend.
+             */
+            config: { rateLimit: { max: 60, timeWindow: "1 hour" } },
             schema: { body: retrySchema },
         },
         async (request, reply) => {
@@ -451,21 +461,11 @@ export default (async (fastify) => {
                     contents,
                 });
             } catch (error: unknown) {
-                request.log.error({ err: error }, "Failed to retry a chat answer");
-
                 if (!reply.raw.headersSent) {
-                    const isDev = process.env.NODE_ENV !== "production";
-
-                    return reply.status(500).send({
-                        error: {
-                            code: "error",
-                            message:
-                                isDev && error instanceof Error
-                                    ? (error.stack ?? error.message)
-                                    : "Internal Server Error",
-                        },
-                    });
+                    return sendInternalError(request, reply, error, "Failed to retry a chat answer");
                 }
+
+                request.log.error({ err: error }, "Failed to retry a chat answer");
             }
         }
     );

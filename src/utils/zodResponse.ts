@@ -11,8 +11,9 @@ export const errorSchema = z.object({
          * Declared here rather than only where it is set, because the zod serializer
          * strips anything a response schema does not mention — a `silent` set in a
          * handler but missing from the schema never reaches the app at all. The rate
-         * limiter gets away with it only because `errorResponseBuilder` bypasses
-         * serialization entirely.
+         * limiter's 429 is the exception: it is thrown, sent as `{ error }` by the global
+         * error handler in index.ts, and no route declares a 429 — so it goes out
+         * unvalidated, `silent` and all.
          */
         silent: z.boolean().optional(),
     }),

@@ -1,3 +1,4 @@
+import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import timezonePlugin from "dayjs/plugin/timezone.js";
@@ -19,7 +20,9 @@ import { MAX_COMPATIBILITY_PEOPLE } from "../../../modules/credits/costs";
 import { creditKeys } from "../../../modules/credits/keys";
 import { refundUnlock, spendCredits } from "../../../modules/credits/service";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
+import { sendInternalError } from "../../../utils/errors";
 import { Genders, getSunSign, Relationships, ZodiacSign } from "../../../utils/natalUtils";
+import { errorResponseBuilder } from "../../../utils/rateLimitResponse";
 import { insufficientCreditsSchema } from "../../../utils/zodResponse";
 import { MIN_AGE } from "../../profile/add";
 
@@ -27,9 +30,28 @@ dayjs.extend(utc);
 dayjs.extend(timezonePlugin);
 
 export default (async (fastify) => {
+    /**
+     * Registered for this plugin but off by default, so only the route below carries it.
+     */
+    await fastify.register(rateLimit, {
+        global: false,
+        keyGenerator: async (request) => {
+            const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+
+            return session?.user?.id ?? request.ip;
+        },
+        errorResponseBuilder,
+    });
+
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/add",
         {
+            /**
+             * Three times the people cap a day. The cap already bounds who can be kept,
+             * this bounds adding and removing in a loop — each add is a paid write and a
+             * round of scoring — while leaving room for retries after a failed save.
+             */
+            config: { rateLimit: { max: 24, timeWindow: "1 day" } },
             schema: {
                 body: z.object({
                     name: z.string().min(1, "Name is required").max(60, "Name must be at most 60 characters long"),
@@ -46,9 +68,9 @@ export default (async (fastify) => {
                         .string()
                         .regex(/^\d{2}:\d{2}$/u, "Birth time must be HH:mm.")
                         .nullable(),
-                    birthPlace: z.string().nullable(),
-                    birthPlaceLat: z.number().nullable(),
-                    birthPlaceLng: z.number().nullable(),
+                    birthPlace: z.string().min(1, "Please enter your birth place.").nullable(),
+                    birthPlaceLat: z.number().min(-90).max(90).nullable(),
+                    birthPlaceLng: z.number().min(-180).max(180).nullable(),
                 }),
                 response: {
                     200: z.object({
@@ -275,28 +297,18 @@ export default (async (fastify) => {
                     data: { compatibilityPersonId },
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
                 if (error instanceof EphemerisError) {
                     request.log.error({ err: error }, "Failed to compute birth chart");
 
                     return reply.status(409).send({
                         error: {
-                            code: "transit_calculation_error",
-                            message: error.message,
+                            code: "birth_chart_failed",
+                            message: "Birth chart could not be computed.",
                         },
                     });
                 }
 
-                request.log.error({ err: error }, "Failed to list compatibility people");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to list compatibility people");
             }
         }
     );

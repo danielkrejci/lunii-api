@@ -9,6 +9,7 @@ import { z } from "zod";
 import { auth } from "../../../lib/auth";
 import { calculateDailyCompatibility } from "../../../modules/compatibilityZodiac/scoring";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
+import { sendInternalError } from "../../../utils/errors";
 import { SINGS_MAP } from "../../../utils/natalUtils";
 
 dayjs.extend(utc);
@@ -88,15 +89,7 @@ export default (async (fastify) => {
 
                 const result = SINGS_MAP.map((sign) => {
                     const compatibility = calculateDailyCompatibility(sign, session.profile!.sunSign, transits.planets);
-                    console.log({
-                        sign,
-                        rawScore: compatibility.rawScore,
-                        score: compatibility.score,
-                        base: compatibility.components.base,
-                        venus: compatibility.components.venus,
-                        moon: compatibility.components.moon,
-                        mars: compatibility.components.mars,
-                    });
+
                     return {
                         sign,
                         rawScore: compatibility.rawScore,
@@ -113,17 +106,7 @@ export default (async (fastify) => {
                     data: result,
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed list compatibility with zodiac signs");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed list compatibility with zodiac signs");
             }
         }
     );

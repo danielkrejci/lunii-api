@@ -26,7 +26,9 @@ import { startDailyInsightGeneration } from "../../modules/insights/generateDail
 import { elongation, moonIllumination } from "../../modules/moon";
 import { getMoonPhase } from "../../modules/transits";
 import { serializeDrizzleData } from "../../utils/drizzleUtils";
+import { sendInternalError } from "../../utils/errors";
 import { SINGS_MAP } from "../../utils/natalUtils";
+import { errorResponseBuilder } from "../../utils/rateLimitResponse";
 import { accessSchema, errorSchema, insufficientCreditsSchema } from "../../utils/zodResponse";
 
 dayjs.extend(utc);
@@ -301,19 +303,7 @@ export default (async (fastify) => {
 
             return session?.user?.id ?? request.ip;
         },
-        errorResponseBuilder: (_request, context) => {
-            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
-
-            return {
-                statusCode: 429,
-                error: {
-                    hours: Math.floor(totalSeconds / 3600),
-                    minutes: Math.floor((totalSeconds % 3600) / 60),
-                    message: "You've reached the limit for now. Please try again later.",
-                    silent: true,
-                },
-            };
-        },
+        errorResponseBuilder,
     });
 
     /* ============================================================
@@ -409,17 +399,7 @@ export default (async (fastify) => {
 
                 return reply.status(200).send({ data });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to read daily insight");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to read daily insight");
             }
         }
     );
@@ -432,11 +412,11 @@ export default (async (fastify) => {
         "/insight/generate",
         {
             /**
-             * Free to the reader but not to us, which is why the limit stays. Three an
+             * Free to the reader but not to us, which is why the limit stays. Five an
              * hour covers a real failure someone wants to retry and stops a stuck day
              * from being retried into a bill of our own.
              */
-            config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
+            config: { rateLimit: { max: 5, timeWindow: "1 hour" } },
             schema: {
                 body: z.object({
                     date: z.string().refine((val) => dayjs.utc(val).isValid(), {
@@ -497,17 +477,7 @@ export default (async (fastify) => {
 
                 return reply.status(202).send({ data });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to generate daily insight");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to generate daily insight");
             }
         }
     );
@@ -614,17 +584,7 @@ export default (async (fastify) => {
 
                 return reply.status(200).send({ data });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to unlock daily insight");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to unlock daily insight");
             }
         }
     );

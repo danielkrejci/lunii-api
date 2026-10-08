@@ -101,10 +101,15 @@ fastify.addHook("onRequest", async (request) => {
 
 fastify.setErrorHandler((error, request, reply) => {
     if (hasZodFastifySchemaValidationErrors(error)) {
+        // `instancePath` is the zod issue path joined with "/", and a bare "/" when the
+        // whole body is wrong — which names no field, so it is left out.
+        const [issue] = error.validation;
+        const field = issue.instancePath.replace(/^\//u, "");
+
         return reply.status(400).send({
             error: {
                 code: "validation_error",
-                message: error.validation[0].message,
+                message: field ? `${field}: ${issue.message}` : issue.message,
             },
         });
     }
@@ -116,15 +121,41 @@ fastify.setErrorHandler((error, request, reply) => {
         );
         return reply.status(500).send({
             error: {
-                code: "internal_server_error",
+                code: "internal_error",
                 message: "Internal Server Error",
             },
         });
     }
 
+    // Fastify hands the handler `unknown`: anything can be thrown, including the plain
+    // object @fastify/rate-limit throws from `errorResponseBuilder`.
+    const thrown = (typeof error === "object" && error !== null ? error : {}) as {
+        statusCode?: unknown;
+        code?: unknown;
+        message?: unknown;
+        error?: unknown;
+    };
+
+    const statusCode = typeof thrown.statusCode === "number" && thrown.statusCode >= 400 ? thrown.statusCode : 500;
+
+    // The rate limiter never sets the status itself, and its `error` is already the body
+    // the app reads (`silent`, `hours`, `minutes`).
+    if (statusCode === 429 && typeof thrown.error === "object" && thrown.error !== null) {
+        return reply.status(429).send({ error: thrown.error });
+    }
+
     request.log.error({ err: error }, "Unhandled request error");
 
-    reply.send(error);
+    return reply.status(statusCode).send({
+        error: {
+            code: typeof thrown.code === "string" ? thrown.code : "error",
+            message: statusCode < 500 && typeof thrown.message === "string" ? thrown.message : "Internal Server Error",
+        },
+    });
+});
+
+fastify.setNotFoundHandler((_request, reply) => {
+    return reply.status(404).send({ error: { code: "not_found", message: "Route not found" } });
 });
 
 fastify.register(formbody);
@@ -176,11 +207,11 @@ fastify.ready(async (err) => {
         fastify.scheduler.addCronJob(createDailyInsightBatchJob(fastify));
         fastify.scheduler.addCronJob(createBatchCollectJob(fastify));
         fastify.scheduler.addCronJob(createBatchCutoffJob(fastify));
-    }
 
-    // immediate run: transits first, then tomorrow's scores for everyone
-    await executeTransitsGeneration(fastify.db);
-    await executeDailyScoresGeneration(fastify.db);
+        // immediate run: transits first, then tomorrow's scores for everyone
+        await executeTransitsGeneration(fastify.db);
+        await executeDailyScoresGeneration(fastify.db);
+    }
 
     // print available routes
     console.log(fastify.printRoutes());

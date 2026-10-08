@@ -11,6 +11,7 @@ import { z } from "zod";
 import { profile } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { computeNatalChart, EphemerisError } from "../../modules/astro";
+import { isUniqueViolation, sendInternalError } from "../../utils/errors";
 import { Gender, Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
 
 dayjs.extend(utc);
@@ -54,9 +55,13 @@ export default (async (fastify) => {
                     birthPlace: z.string().min(1, "Please enter your birth place."),
                     birthPlaceLat: z
                         .number()
+                        .min(-90)
+                        .max(90)
                         .refine((value) => String(value).length > 0, "Please enter your birth place."),
                     birthPlaceLng: z
                         .number()
+                        .min(-180)
+                        .max(180)
                         .refine((value) => String(value).length > 0, "Please enter your birth place."),
                     country: z.string().min(1, "Please select your country."),
                     language: z.string().min(1, "Please select your preferred language."),
@@ -124,7 +129,7 @@ export default (async (fastify) => {
             if (!session) {
                 return reply.status(401).send({
                     error: {
-                        code: "Unauthorized",
+                        code: "unauthorized",
                         message: "User must be logged in to access this resource.",
                     },
                 });
@@ -185,28 +190,29 @@ export default (async (fastify) => {
                     data: true,
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
                 if (error instanceof EphemerisError) {
                     request.log.error({ err: error }, "Failed to compute birth chart");
 
                     return reply.status(409).send({
                         error: {
-                            code: "transit_calculation_error",
-                            message: error.message,
+                            code: "birth_chart_failed",
+                            message: "Birth chart could not be computed.",
                         },
                     });
                 }
 
-                request.log.error({ err: error }, "Failed to add profile");
+                // Two onboarding submits racing past the check above: the unique index on
+                // userId lets exactly one through, and the other is the same conflict.
+                if (isUniqueViolation(error)) {
+                    return reply.status(409).send({
+                        error: {
+                            code: "profile_already_exists",
+                            message: "Profile already exists",
+                        },
+                    });
+                }
 
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to add profile");
             }
         }
     );

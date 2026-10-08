@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import { auth } from "../lib/auth";
 import { getOrCreateTransits } from "../modules/dailyScore/service";
+import { sendInternalError } from "../utils/errors";
 
 dayjs.extend(utc);
 
@@ -86,17 +87,7 @@ export default (async (fastify) => {
                     },
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to get transits");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to get transits");
             }
         }
     );

@@ -13,7 +13,11 @@ import { SubscriptionStatus } from "./types";
  * receipt or an entitlement — `/api/credits/sync` takes only an app user id.
  */
 
-const BASE_URL = "https://api.revenuecat.com/v2";
+const ORIGIN = "https://api.revenuecat.com";
+const BASE_PATH = "/v2";
+
+/** The largest page the v2 lists accept, so a typical customer is one request. */
+const PAGE_SIZE = 100;
 
 /** Beyond this the caller is better off with the webhook it already has. */
 const TIMEOUT_MS = 5000;
@@ -72,40 +76,62 @@ function toStatus(remote: string | undefined, autoRenew: string | undefined): Su
  * `CREDIT_PACKS` therefore matches nothing, silently: the purchase is filtered out as
  * "not a pack we know", and the reader never gets their credits.
  *
- * Cached because it changes only when a product is added, and a sync should not spend a
- * round trip on it every time.
+ * Cached for an hour because it changes only when a product is added — and an id the
+ * map does not know refreshes it on the spot, so a new pack still works the minute it
+ * exists. The promise is what is cached, not the map: a sync asks for it twice at
+ * once, and both callers share the one request instead of each starting their own.
  */
-let productMap: { at: number; byId: Map<string, string> } | null = null;
+let productMap: { at: number; byId: Promise<Map<string, string>> } | null = null;
 
-const PRODUCT_MAP_TTL_MS = 10 * 60_000;
+const PRODUCT_MAP_TTL_MS = 60 * 60_000;
 
-async function storeIdentifiers(): Promise<Map<string, string>> {
-    if (productMap && Date.now() - productMap.at < PRODUCT_MAP_TTL_MS) {
+function storeIdentifiers(options: { refresh?: boolean } = {}): Promise<Map<string, string>> {
+    if (!options.refresh && productMap && Date.now() - productMap.at < PRODUCT_MAP_TTL_MS) {
         return productMap.byId;
     }
 
-    const body = (await get(`/projects/${env.REVENUECAT_PROJECT_ID}/products?limit=100`)) as {
-        items?: Record<string, unknown>[];
-    };
+    const byId = getAll(`/projects/${env.REVENUECAT_PROJECT_ID}/products`).then((items) => {
+        const map = new Map<string, string>();
 
-    const byId = new Map<string, string>();
+        for (const item of items) {
+            const id = typeof item.id === "string" ? item.id : null;
+            const storeIdentifier = typeof item.store_identifier === "string" ? item.store_identifier : null;
 
-    for (const item of body.items ?? []) {
-        const id = typeof item.id === "string" ? item.id : null;
-        const storeIdentifier = typeof item.store_identifier === "string" ? item.store_identifier : null;
-
-        if (id && storeIdentifier) {
-            byId.set(id, storeIdentifier);
+            if (id && storeIdentifier) {
+                map.set(id, storeIdentifier);
+            }
         }
-    }
 
-    productMap = { at: Date.now(), byId };
+        return map;
+    });
+
+    const entry = { at: Date.now(), byId };
+
+    productMap = entry;
+
+    // A failed fetch must not be served for the next hour.
+    byId.catch(() => {
+        if (productMap === entry) {
+            productMap = null;
+        }
+    });
 
     return byId;
 }
 
+/** The map, refreshed once if it does not know every id it is about to be asked for. */
+async function storeIdentifiersFor(productIds: string[]): Promise<Map<string, string>> {
+    const byId = await storeIdentifiers();
+
+    if (productIds.every((id) => id.length === 0 || byId.has(id))) {
+        return byId;
+    }
+
+    return storeIdentifiers({ refresh: true });
+}
+
 async function get(path: string): Promise<unknown> {
-    const response = await fetch(`${BASE_URL}${path}`, {
+    const response = await fetch(new URL(path, ORIGIN), {
         headers: {
             authorization: `Bearer ${env.REVENUECAT_API_KEY}`,
             accept: "application/json",
@@ -118,6 +144,30 @@ async function get(path: string): Promise<unknown> {
     }
 
     return response.json();
+}
+
+/** A ceiling on pages, so a cursor that never ends cannot hold a sync open forever. */
+const MAX_PAGES = 10;
+
+/**
+ * Every item of a v2 list, across pages.
+ *
+ * The lists are cursor-paged, and the order of items is not documented — so reading
+ * only the first page could miss the purchase that was just made, once a customer has
+ * more than a page of them. `next_page` is a path from the origin, `/v2/...` included.
+ */
+async function getAll(path: string): Promise<Record<string, unknown>[]> {
+    const items: Record<string, unknown>[] = [];
+    let next: string | null = `${BASE_PATH}${path}${path.includes("?") ? "&" : "?"}limit=${PAGE_SIZE}`;
+
+    for (let page = 0; next !== null && page < MAX_PAGES; page += 1) {
+        const body = (await get(next)) as { items?: Record<string, unknown>[]; next_page?: string | null };
+
+        items.push(...(body.items ?? []));
+        next = typeof body.next_page === "string" && body.next_page.length > 0 ? body.next_page : null;
+    }
+
+    return items;
 }
 
 function toDate(value: unknown): Date | null {
@@ -140,14 +190,14 @@ function toEnvironment(value: unknown): "PRODUCTION" | "SANDBOX" {
 
 /** Every subscription RevenueCat holds for this customer. */
 export async function fetchSubscriptions(appUserId: string): Promise<RemoteSubscription[]> {
-    const [body, byId] = await Promise.all([
-        get(
-            `/projects/${env.REVENUECAT_PROJECT_ID}/customers/${encodeURIComponent(appUserId)}/subscriptions`
-        ) as Promise<{ items?: Record<string, unknown>[] }>,
+    const [items] = await Promise.all([
+        getAll(`/projects/${env.REVENUECAT_PROJECT_ID}/customers/${encodeURIComponent(appUserId)}/subscriptions`),
+        // Warmed alongside, so the common case still costs no extra wait.
         storeIdentifiers(),
     ]);
+    const byId = await storeIdentifiersFor(items.map((item) => String(item.product_id ?? "")));
 
-    return (body.items ?? [])
+    return items
         .map((item) => {
             // Translated, not read directly — see `storeIdentifiers`.
             const productId = byId.get(String(item.product_id ?? "")) ?? "";
@@ -167,14 +217,14 @@ export async function fetchSubscriptions(appUserId: string): Promise<RemoteSubsc
 
 /** Every consumable RevenueCat holds for this customer that we know how to price. */
 export async function fetchPurchases(appUserId: string): Promise<RemotePurchase[]> {
-    const [body, byId] = await Promise.all([
-        get(`/projects/${env.REVENUECAT_PROJECT_ID}/customers/${encodeURIComponent(appUserId)}/purchases`) as Promise<{
-            items?: Record<string, unknown>[];
-        }>,
+    const [items] = await Promise.all([
+        getAll(`/projects/${env.REVENUECAT_PROJECT_ID}/customers/${encodeURIComponent(appUserId)}/purchases`),
+        // Warmed alongside, so the common case still costs no extra wait.
         storeIdentifiers(),
     ]);
+    const byId = await storeIdentifiersFor(items.map((item) => String(item.product_id ?? "")));
 
-    return (body.items ?? [])
+    return items
         .map((item) => {
             // Translated, not read directly — see `storeIdentifiers`.
             const productId = byId.get(String(item.product_id ?? "")) ?? "";

@@ -11,6 +11,7 @@ import { auth } from "../../lib/auth";
 import { pickSuggestions } from "../../modules/chat/suggestions";
 import { summarizePlanetInfluence } from "../../modules/dailyScore";
 import { getDailyScore, getOrCreateTransits, scoreProfileForDate } from "../../modules/dailyScore/service";
+import { sendInternalError } from "../../utils/errors";
 import { errorSchema } from "../../utils/zodResponse";
 
 dayjs.extend(utc);
@@ -106,11 +107,7 @@ export default (async (fastify) => {
 
                 return reply.status(200).send({ data: { items } });
             } catch (error: unknown) {
-                request.log.error({ err: error }, "Failed to build chat suggestions");
-
-                return reply.status(500).send({
-                    error: { code: "error", message: "Internal Server Error" },
-                });
+                return sendInternalError(request, reply, error, "Failed to build chat suggestions");
             }
         }
     );

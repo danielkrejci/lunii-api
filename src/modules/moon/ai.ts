@@ -36,16 +36,6 @@ export interface MoonInsightContent {
      * Optional because rows written before captions existed do not carry it.
      */
     contacts?: Record<string, MoonContactText>;
-    /**
-     * What today's Moon is and is not good for, as scannable chips rather than prose.
-     *
-     * Deliberately keyword-only: the daily horoscope already writes an `opportunity` and
-     * a `watchOut` for the whole day, and a second prose recommendation from a separate
-     * generation would sooner or later contradict it on the same screen.
-     *
-     * Optional for the same reason as `contacts` — earlier rows do not carry it.
-     */
-    activities?: MoonActivities;
 }
 
 export interface MoonContactText {
@@ -62,12 +52,6 @@ export interface MoonContactText {
     description?: string;
 }
 
-export interface MoonActivities {
-    /** Four expressions of 1–3 words each. */
-    supported: string[];
-    avoid: string[];
-}
-
 const answerSchema = z.object({
     /**
      * One entry per paragraph, joined into `MoonInsightContent.insight` below.
@@ -78,7 +62,6 @@ const answerSchema = z.object({
     insight: z.array(z.string()),
     /** An array on the wire, turned into a record below — models count badly on objects. */
     contacts: z.array(z.object({ id: z.string(), title: z.string(), description: z.string() })),
-    activities: z.object({ supported: z.array(z.string()), avoid: z.array(z.string()) }),
 });
 
 /**
@@ -90,9 +73,6 @@ const answerSchema = z.object({
 export interface MoonTeaser {
     /** The horoscope's whole Moon note — one text, what it is like and why. */
     insight: string;
-    /** The horoscope's four supported and four discouraged activities for the whole day. */
-    opportunities?: string[];
-    watchOuts?: string[];
 }
 
 /* ============================================================
@@ -184,20 +164,7 @@ Their daily horoscope already carries this short note about the Moon:
 
 Continue from it. Go deeper and be more specific — do not restate it, and do not
 contradict it.
-${
-    input.teaser.opportunities?.length || input.teaser.watchOuts?.length
-        ? `
-The same horoscope already suggested these for the day as a whole:
-
-Supported: ${input.teaser.opportunities?.join(", ") || "none"}
-Discouraged: ${input.teaser.watchOuts?.join(", ") || "none"}
-
-Do not repeat those words verbatim. You may build on them — the Moon is part of the
-same day and the same chart, so narrowing one of them to something specifically lunar
-is better than inventing an unrelated direction. Never contradict them.
 `
-        : ""
-}`
         : "";
 
     return `
@@ -295,11 +262,7 @@ Return ONLY valid JSON.
             "id": "string",
             "title": "string"
         }
-    ],
-    "activities": {
-        "supported": ["string", "string", "string", "string"],
-        "avoid": ["string", "string", "string", "string"]
-    }
+    ]
 }
 
 - insight:
@@ -368,24 +331,6 @@ Return ONLY valid JSON.
   Follow the explanation rules: name what the planets do, never the angle between them.
   The angle belongs in the title and nowhere else.
 
-- activities:
-  Exactly 4 entries in each array, each 1–3 words. These are chips on a screen, not
-  sentences, and not a repeat of what you wrote above.
-
-  Derive them from the three things that make today specific: the Moon's SIGN, its
-  PHASE, and the ASPECTS listed above. Let the supportive aspects and what the sign and
-  phase favour drive "supported"; let the difficult aspects and what they strain drive
-  "avoid".
-
-  Name ACTIVITIES AND SITUATIONS, not feelings or qualities. "Deep conversations" is
-  right; "Emotional depth" is not. "Decluttering", "Journaling", "Reaching out",
-  "Rushing decisions", "Big purchases", "Crowded plans" are the register.
-
-  Never reuse a word you already used in "insight".
-
-  Do not hedge: "avoid" names things genuinely worth postponing today, not vague
-  cautions that would be true on any day, or for any reader.
-
 ==================================================
 HOW TO WRITE IT
 ==================================================
@@ -395,7 +340,7 @@ ${VOICE_RULES}
 Two rules on top of those, for this screen:
 
 Never name the aspects as jargon in "insight" — the reader should recognise the
-experience, not the geometry. The captions and the chips are labels, not prose.
+experience, not the geometry. The captions are labels, not prose.
 
 "contacts[].title" is the single exception in the whole answer: it is the aspect's name,
 so it names the geometry. Nothing else does.
@@ -584,15 +529,6 @@ export function readMoonInsightAnswer(
                     },
                 ])
             ),
-            /**
-             * Trimmed to four each because the schema cannot bound array length for the
-             * decoder — a model that returns six chips would otherwise overflow the row
-             * of them on the screen.
-             */
-            activities: {
-                supported: parsed.data.activities.supported.slice(0, 4),
-                avoid: parsed.data.activities.avoid.slice(0, 4),
-            },
         },
     };
 }

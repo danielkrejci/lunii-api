@@ -12,6 +12,7 @@ import { creditKeys } from "../../../modules/credits/keys";
 import { listUnlocked } from "../../../modules/credits/service";
 import { getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { serializeDrizzleData } from "../../../utils/drizzleUtils";
+import { sendInternalError } from "../../../utils/errors";
 import { SINGS_MAP } from "../../../utils/natalUtils";
 
 export default (async (fastify) => {
@@ -168,17 +169,7 @@ export default (async (fastify) => {
                     })),
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to list compatibility people");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to list compatibility people");
             }
         }
     );

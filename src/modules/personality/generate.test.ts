@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { NatalAspect, NatalChart } from "../../modules/astro";
+import { NatalAspect, NatalChart } from "../astro";
 import { buildPrompt } from "./generate";
 
 const chart = {

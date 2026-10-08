@@ -475,6 +475,32 @@ export async function refundUnlocks(
 }
 
 /**
+ * Takes unlocks away without giving anything back.
+ *
+ * For a purchase whose subject changed after it was bought: the text that replaces it is
+ * a reading about a different chart, so it is a new purchase. Refunding instead would
+ * make every edit a free regeneration. No ledger row, because the balance does not move.
+ */
+export async function revokeUnlocks(
+    db: DbOrTx,
+    input: { userId: string; feature: CreditFeature; resourceKeys: string[] }
+): Promise<void> {
+    if (input.resourceKeys.length === 0) {
+        return;
+    }
+
+    await db
+        .delete(creditUnlocks)
+        .where(
+            and(
+                eq(creditUnlocks.userId, input.userId),
+                eq(creditUnlocks.feature, input.feature),
+                inArray(creditUnlocks.resourceKey, input.resourceKeys)
+            )
+        );
+}
+
+/**
  * Adds credits from something that is not regeneration — a bought pack, or a clawback
  * when Apple takes one back.
  *

@@ -22,6 +22,8 @@ export const CREDIT_FEATURES = [
     "planetInsight",
     "compatibilityDetail",
     "compatibilityPerson",
+    /** Any change to the reader's own profile, which rewrites what was written from it. */
+    "profileUpdate",
 ] as const;
 
 export type CreditFeature = (typeof CREDIT_FEATURES)[number];

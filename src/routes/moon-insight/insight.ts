@@ -2,38 +2,28 @@ import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
-import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { aiGenerations, moonInsights, profile as profileTable } from "../../db/schema";
+import { moonInsights, profile as profileTable } from "../../db/schema";
 import { auth } from "../../lib/auth";
-import { MOON_PHASES, TransitChart } from "../../modules/astro";
+import { MOON_PHASES } from "../../modules/astro";
 import { creditKeys } from "../../modules/credits/keys";
-import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../modules/credits/service";
-import { summarizePlanetInfluence, toContactSummary } from "../../modules/dailyScore";
-import { getOrCreateTransits, scoreProfileForDate } from "../../modules/dailyScore/service";
-import { DailyScoreResult, PlanetContact } from "../../modules/dailyScore/types";
+import { AccessState, checkAccess, spendCredits } from "../../modules/credits/service";
+import { toContactSummary } from "../../modules/dailyScore";
+import { scoreProfileForDate } from "../../modules/dailyScore/service";
 import { GenerationStatus } from "../../modules/insights";
-import { awaitDailyContent } from "../../modules/insights/awaitDailyContent";
-import { startDailyInsightGeneration } from "../../modules/insights/generateDaily";
-import { generateMoonInsight, MoonInsightContent, MoonTeaser } from "../../modules/moon/ai";
-import { describeMoonDay, MOON_VARIANTS, MoonToday } from "../../modules/moon/today";
+import { MoonInsightContent } from "../../modules/moon/ai";
+import { ensureMoonRow, lunarContacts, startMoonInsightGeneration } from "../../modules/moon/generate";
+import { MOON_VARIANTS } from "../../modules/moon/today";
+import { sendInternalError } from "../../utils/errors";
 import { SINGS_MAP } from "../../utils/natalUtils";
+import { errorResponseBuilder } from "../../utils/rateLimitResponse";
 import { accessSchema, errorSchema, insufficientCreditsSchema } from "../../utils/zodResponse";
 
 dayjs.extend(utc);
-
-/**
- * Today's transit-Moon → natal contacts, strongest first.
- *
- * On the shared limit rather than one of its own: every screen now shows every aspect a
- * body really makes, so there is nothing left for this one to widen.
- */
-function lunarContacts(score: DailyScoreResult): PlanetContact[] {
-    return summarizePlanetInfluence(score.impacts).find((planet) => planet.name === "moon")?.contacts ?? [];
-}
 
 /**
  * Shared by the read and the generate route on purpose: a generate response can go
@@ -108,12 +98,6 @@ const responseSchema = z.object({
                             description: z.string().optional(),
                         })
                     ),
-                    /**
-                     * Chips, not prose: what today's Moon is and is not good for. Four
-                     * expressions each, 1–3 words. Empty arrays on rows generated before
-                     * these existed.
-                     */
-                    activities: z.object({ supported: z.array(z.string()), avoid: z.array(z.string()) }),
                 }),
                 error: z.null(),
             }),
@@ -123,236 +107,13 @@ const responseSchema = z.object({
 
 type ResponseData = z.infer<typeof responseSchema>["data"];
 
-/**
- * Claims the day and, if the claim succeeds, writes the text. Runs detached from the
- * request that started it: the model needs 30–60 seconds and no client should hold a
- * connection open that long.
- *
- * The claim is a single statement on purpose — a SELECT followed by an UPDATE would let
- * two concurrent requests both start a paid generation. It fires when the day has no
- * content and nothing else owns it: never generated (`absent`), previously failed but
- * only for an explicit retry, or claimed by a run that has since died and left its
- * `pending` older than the timeout.
- */
-async function generate(
-    fastify: FastifyInstance,
-    input: {
-        userId: string;
-        /** The whole stored profile: scoring needs the chart, the prompt needs the rest. */
-        profile: typeof profileTable.$inferSelect;
-        date: string;
-        allowFailed: boolean;
-    }
-): Promise<void> {
-    const { userId, date } = input;
-
-    const [claimed] = await fastify.db
-        .update(moonInsights)
-        /**
-         * Truncated to milliseconds because the claim timestamp has to survive a round
-         * trip through a JS `Date`, which has no microseconds. Full `now()` precision
-         * would come back short and the write below would match no row at all.
-         */
-        .set({ status: "pending", updatedAt: sql`date_trunc('milliseconds', now())` })
-        .where(
-            and(
-                eq(moonInsights.userId, userId),
-                eq(moonInsights.date, date),
-                isNull(moonInsights.content),
-                or(
-                    eq(moonInsights.status, "absent"),
-                    input.allowFailed ? eq(moonInsights.status, "failed") : sql`false`,
-                    and(
-                        eq(moonInsights.status, "pending"),
-                        lt(moonInsights.updatedAt, sql`now() - interval '5 minutes'`)
-                    )
-                )
-            )
-        )
-        .returning({ updatedAt: moonInsights.updatedAt, variant: moonInsights.variant });
-
-    if (!claimed) {
-        return;
-    }
-
-    /**
-     * The claim is awaited so the caller can answer with the state it just created; the
-     * model itself is not, because it needs 30–60 seconds and no request may hold a
-     * connection open that long. Every write below carries the claimed timestamp: a run
-     * whose row has been touched since (a language change, or a timeout and a new claim)
-     * must not overwrite what replaced it.
-     */
-    void (async () => {
-        const owned = and(
-            eq(moonInsights.userId, userId),
-            eq(moonInsights.date, date),
-            eq(moonInsights.updatedAt, claimed.updatedAt)
-        );
-
-        const transitData = await getOrCreateTransits(fastify.db, date, input.profile.timezone);
-
-        const moon = describeMoonDay({
-            date,
-            timezone: input.profile.timezone,
-            sunLongitude: transitData.planets.sun.longitude,
-            moonLongitude: transitData.planets.moon.longitude,
-            moonSign: transitData.planets.moon.sign,
-        });
-
-        const contacts = lunarContacts(scoreProfileForDate(input.profile, transitData.planets));
-
-        /**
-         * Continuity with the horoscope the reader has open, waited for while it is still
-         * being written.
-         *
-         * The Moon can be opened straight from home, on the same tick the horoscope
-         * starts, so without the wait the teaser would be missing exactly when the two
-         * texts sit closest together. `awaitDailyContent` waits only on `pending` and
-         * gives up on a failure or a timeout, so a broken horoscope still cannot freeze
-         * this panel — it just writes standalone.
-         */
-        const dailyContent = await awaitDailyContent(fastify.db, {
-            userId,
-            date,
-            /**
-             * When nothing is writing the horoscope, ask for it. Writing it costs the
-             * reader nothing, and the alternative is this panel quoting a day that was
-             * never written.
-             */
-            start: () =>
-                startDailyInsightGeneration(fastify, {
-                    userId,
-                    profile: input.profile,
-                    date,
-                    allowFailed: true,
-                }),
-        });
-
-        const teaser: MoonTeaser | null = dailyContent
-            ? {
-                  ...dailyContent.moon,
-                  // What the horoscope already proposed for the day as a whole, so the
-                  // Moon screen narrows it rather than repeating or contradicting it.
-                  opportunities: dailyContent.opportunity?.examples,
-                  watchOuts: dailyContent.watchOut?.examples,
-              }
-            : null;
-
-        // One retry, because most failures here are a timeout or a rate limit rather
-        // than anything a second attempt would hit again.
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            const { content, usage } = await generateMoonInsight({
-                // The stored variant, not today's: it is what this row promised.
-                variant: claimed.variant,
-                moon,
-                contacts,
-                teaser,
-                languageIso: input.profile.language,
-                // The stored row satisfies Reader structurally, so nothing has to be
-                // picked apart here and forgotten when a field is added.
-                reader: input.profile,
-                natalMoonSign: input.profile.moonSign,
-            });
-
-            // The audit row is the only place the prompt, the answer and the price
-            // survive, and it must never be the reason a finished text is lost.
-            await fastify.db
-                .insert(aiGenerations)
-                .values({
-                    userId,
-                    type: "moonInsight",
-                    status: content ? "success" : "error",
-                    error: usage.error,
-                    requestId: usage.requestId,
-                    provider: usage.provider,
-                    model: usage.model,
-                    input: usage.input,
-                    output: usage.output,
-                    inputTokens: usage.inputTokens,
-                    outputTokens: usage.outputTokens,
-                    total_tokens: usage.totalTokens,
-                    latencyMs: usage.latencyMs,
-                    cost: usage.cost,
-                })
-                .catch((error: unknown) =>
-                    fastify.log.error({ err: error, userId, date }, "Failed to log AI generation")
-                );
-
-            if (content) {
-                const written = await fastify.db
-                    .update(moonInsights)
-                    .set({ content, status: "ready", updatedAt: sql`date_trunc('milliseconds', now())` })
-                    .where(owned)
-                    .returning({ date: moonInsights.date });
-
-                // Nothing matched: the row moved on while the model was writing. Worth
-                // saying out loud — the text was paid for and then thrown away.
-                if (written.length === 0) {
-                    fastify.log.warn({ userId, date }, "Generated moon insight discarded, the row had moved on");
-                }
-
-                return;
-            }
-        }
-
-        const failed = await fastify.db
-            .update(moonInsights)
-            .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
-            .where(owned)
-            .returning({ date: moonInsights.date });
-
-        /**
-         * Give the credits back, and revoke the unlock with them. Guarded on the update
-         * having matched, so only the run that owned this row refunds; `refundUnlock`
-         * deletes and returns exactly once, so the sweeper racing it gives back nothing.
-         */
-        if (failed.length > 0) {
-            await refundUnlock(fastify.db, {
-                userId,
-                feature: "moonInsight",
-                resourceKey: creditKeys.moonInsight(date),
-            }).catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Failed to refund credits"));
-        }
-    })().catch((error: unknown) => fastify.log.error({ err: error, userId, date }, "Moon generation crashed"));
-}
-
-/**
- * Creates the day's row if it is not there, and returns the deterministic half.
- *
- * The claim in `generate` is an UPDATE, so it can only fire on a row that already exists
- * — which is why both routes run this before claiming. `variant` is written exactly once,
- * here: on conflict nothing changes, so a row created on an earlier read keeps the
- * variant its text was written for even if the reader has since crossed a timezone.
- */
-async function ensureRow(
-    db: FastifyInstance["db"],
-    input: { userId: string; profile: typeof profileTable.$inferSelect; date: string }
-): Promise<{ moon: MoonToday; transits: TransitChart }> {
-    const { date, userId } = input;
-
-    const transitData = await getOrCreateTransits(db, date, input.profile.timezone);
-
-    const moon = describeMoonDay({
-        date,
-        timezone: input.profile.timezone,
-        sunLongitude: transitData.planets.sun.longitude,
-        moonLongitude: transitData.planets.moon.longitude,
-        moonSign: transitData.planets.moon.sign,
-    });
-
-    await db.insert(moonInsights).values({ userId, date, variant: moon.variant }).onConflictDoNothing();
-
-    // The transits come back with it: scoring the day needs them, and they cost a query.
-    return { moon, transits: transitData.planets };
-}
-
 async function buildResponse(
     db: FastifyInstance["db"],
     input: { userId: string; profile: typeof profileTable.$inferSelect; date: string; access: AccessState }
 ): Promise<ResponseData> {
     const { date, userId } = input;
 
-    const { moon, transits } = await ensureRow(db, input);
+    const { moon, transits } = await ensureMoonRow(db, input);
 
     // Recomputed on every read, exactly like the rest of the deterministic half, and from
     // the same contacts the text was written from.
@@ -394,13 +155,12 @@ function describeContent(
     if (stored?.status === "ready" && stored.content) {
         return {
             status: "ready",
-            // Rows written before captions and chips existed carry neither. Empty is the
-            // honest answer, and the screen falls back to the numbers rather than the
-            // response failing to serialize.
+            // Picked field by field rather than spread: older rows still carry the
+            // activity chips that are no longer generated. Rows written before captions
+            // existed carry none, and the screen falls back to the numbers.
             data: {
-                ...stored.content,
+                insight: stored.content.insight,
                 aspects: stored.content.contacts ?? {},
-                activities: stored.content.activities ?? { supported: [], avoid: [] },
             },
             error: null,
         };
@@ -435,19 +195,7 @@ export default (async (fastify) => {
 
             return session?.user?.id ?? request.ip;
         },
-        errorResponseBuilder: (_request, context) => {
-            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
-
-            return {
-                statusCode: 429,
-                error: {
-                    hours: Math.floor(totalSeconds / 3600),
-                    minutes: Math.floor((totalSeconds % 3600) / 60),
-                    message: "You've reached the limit for now. Please try again later.",
-                    silent: true,
-                },
-            };
-        },
+        errorResponseBuilder,
     });
 
     /* ============================================================
@@ -522,7 +270,7 @@ export default (async (fastify) => {
                  * so the answer is already the one this claim is about to make true.
                  */
                 if (access.unlocked && !data.content.data) {
-                    await generate(fastify, {
+                    await startMoonInsightGeneration(fastify, {
                         userId: session.user.id,
                         profile: session.profile,
                         date,
@@ -532,17 +280,7 @@ export default (async (fastify) => {
 
                 return reply.status(200).send({ data });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to read moon insight");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to read moon insight");
             }
         }
     );
@@ -556,10 +294,11 @@ export default (async (fastify) => {
         {
             /**
              * The only endpoint here that spends money on demand, and there is no
-             * attempts counter behind it. Three an hour covers a real failure the user
-             * wants to retry, and stops a stuck day from being retried into a bill.
+             * attempts counter behind it. Five an hour covers the purchase plus a real
+             * failure the user wants to retry, and stops a stuck day from being retried
+             * into a bill.
              */
-            config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
+            config: { rateLimit: { max: 5, timeWindow: "1 hour" } },
             schema: {
                 body: z.object({
                     date: z.string().refine((val) => dayjs.utc(val).isValid(), {
@@ -595,7 +334,7 @@ export default (async (fastify) => {
 
                 // The client may retry a day it has never read, and the claim below can
                 // only update a row that is already there.
-                await ensureRow(fastify.db, { userId: session.user.id, profile: session.profile, date });
+                await ensureMoonRow(fastify.db, { userId: session.user.id, profile: session.profile, date });
 
                 /**
                  * The purchase. This endpoint is both the unlock and the retry, and the
@@ -629,7 +368,7 @@ export default (async (fastify) => {
                  * Claimed before the response is built, so the client is told `pending`
                  * and starts polling instead of reading back the failure it just retried.
                  */
-                await generate(fastify, {
+                await startMoonInsightGeneration(fastify, {
                     userId: session.user.id,
                     profile: session.profile,
                     date,
@@ -649,17 +388,7 @@ export default (async (fastify) => {
 
                 return reply.status(202).send({ data });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to generate moon insight");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to generate moon insight");
             }
         }
     );

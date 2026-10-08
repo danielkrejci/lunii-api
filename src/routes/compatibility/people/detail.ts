@@ -2,22 +2,24 @@ import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc.js";
-import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { aiGenerations, compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
+import { compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { NatalChart } from "../../../modules/astro";
-import { generateCompatibilityInsight } from "../../../modules/compatibilityPeople/ai";
 import { CONTACT_SIDES, dailyContacts } from "../../../modules/compatibilityPeople/contacts";
 import { scoreDay } from "../../../modules/compatibilityPeople/daily";
+import { startCompatibilityGeneration } from "../../../modules/compatibilityPeople/generateDetail";
 import { creditKeys } from "../../../modules/credits/keys";
-import { AccessState, checkAccess, refundUnlock, spendCredits } from "../../../modules/credits/service";
+import { AccessState, checkAccess, spendCredits } from "../../../modules/credits/service";
 import { datesAround, getOrCreateTransits } from "../../../modules/dailyScore/service";
 import { serializeDrizzleData } from "../../../utils/drizzleUtils";
+import { sendInternalError } from "../../../utils/errors";
 import { Genders, Relationships, SINGS_MAP } from "../../../utils/natalUtils";
+import { errorResponseBuilder } from "../../../utils/rateLimitResponse";
 import { accessSchema, errorSchema, insufficientCreditsSchema } from "../../../utils/zodResponse";
 
 dayjs.extend(utc);
@@ -348,148 +350,6 @@ function describeContent(person: Person, access: AccessState) {
     return { status: "pending" as const, data: null, error: null };
 }
 
-/**
- * Claims the day for this person and, if the claim succeeds, writes the reading.
- *
- * Same shape as the daily insight: one statement decides who pays for the model, the
- * work itself runs detached, and every write carries the claimed timestamp so a run
- * whose row has moved on cannot overwrite it. The key is (person, date) rather than
- * (user, date) — ownership was already checked by the caller.
- */
-async function generate(
-    fastify: FastifyInstance,
-    input: {
-        person: Person;
-        profile: NonNullable<NonNullable<Awaited<ReturnType<typeof auth.api.getSession>>>["profile"]>;
-        date: string;
-        allowFailed: boolean;
-    }
-): Promise<void> {
-    const { person, profile, date } = input;
-
-    const [claimed] = await fastify.db
-        .update(compatibilityPeopleScores)
-        // Milliseconds, because the timestamp has to survive a round trip through a JS
-        // `Date`; full `now()` precision would come back short and match no row.
-        .set({ status: "pending", updatedAt: sql`date_trunc('milliseconds', now())` })
-        .where(
-            and(
-                eq(compatibilityPeopleScores.personId, person.id),
-                eq(compatibilityPeopleScores.date, date),
-                isNull(compatibilityPeopleScores.content),
-                or(
-                    eq(compatibilityPeopleScores.status, "absent"),
-                    input.allowFailed ? eq(compatibilityPeopleScores.status, "failed") : sql`false`,
-                    and(
-                        eq(compatibilityPeopleScores.status, "pending"),
-                        lt(compatibilityPeopleScores.updatedAt, sql`now() - interval '5 minutes'`)
-                    )
-                )
-            )
-        )
-        .returning({ updatedAt: compatibilityPeopleScores.updatedAt });
-
-    if (!claimed) {
-        return;
-    }
-
-    void (async () => {
-        const owned = and(
-            eq(compatibilityPeopleScores.personId, person.id),
-            eq(compatibilityPeopleScores.date, date),
-            eq(compatibilityPeopleScores.updatedAt, claimed.updatedAt)
-        );
-
-        // One retry: most failures here are a timeout or a rate limit rather than
-        // anything a second attempt would hit again.
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            const { content, usage } = await generateCompatibilityInsight(profile.language, {
-                score: person.score,
-                modifier: person.compatibility.modifier,
-
-                positiveTotal: person.compatibility.positiveOverall,
-                negativeTotal: person.compatibility.negativeOverall,
-
-                breakdown: person.compatibility.overallBreakdown,
-
-                // The same list the response carries, so the captions the model writes
-                // land on exactly the aspects shown underneath the text.
-                contacts: dailyContacts(person.compatibility),
-
-                relationshipType: person.relationship,
-
-                // The stored row satisfies Reader structurally, so nothing has to be
-                // picked apart here and forgotten when a field is added.
-                reader: profile,
-
-                personA: { name: profile.name, gender: profile.gender, sunSign: profile.sunSign },
-                personB: { name: person.name, gender: person.gender, sunSign: person.sign },
-            });
-
-            await fastify.db
-                .insert(aiGenerations)
-                .values({
-                    userId: profile.userId,
-                    type: "compatibilityPeople",
-                    status: content ? "success" : "error",
-                    error: usage.error,
-                    requestId: usage.requestId,
-                    provider: usage.provider,
-                    model: usage.model,
-                    input: usage.input,
-                    output: usage.output,
-                    inputTokens: usage.inputTokens,
-                    outputTokens: usage.outputTokens,
-                    total_tokens: usage.totalTokens,
-                    latencyMs: usage.latencyMs,
-                    cost: usage.cost,
-                })
-                .catch((error: unknown) =>
-                    fastify.log.error({ err: error, personId: person.id, date }, "Failed to log AI generation")
-                );
-
-            if (content) {
-                const written = await fastify.db
-                    .update(compatibilityPeopleScores)
-                    .set({ content, status: "ready", updatedAt: sql`date_trunc('milliseconds', now())` })
-                    .where(owned)
-                    .returning({ date: compatibilityPeopleScores.date });
-
-                if (written.length === 0) {
-                    fastify.log.warn(
-                        { personId: person.id, date },
-                        "Generated reading discarded, the row had moved on"
-                    );
-                }
-
-                return;
-            }
-        }
-
-        const failed = await fastify.db
-            .update(compatibilityPeopleScores)
-            .set({ status: "failed", updatedAt: sql`date_trunc('milliseconds', now())` })
-            .where(owned)
-            .returning({ date: compatibilityPeopleScores.date });
-
-        /**
-         * Give the credits back, and revoke the unlock with them. Guarded on the update
-         * having matched, so only the run that owned this row refunds; `refundUnlock`
-         * deletes and returns exactly once, so the sweeper racing it gives back nothing.
-         */
-        if (failed.length > 0) {
-            await refundUnlock(fastify.db, {
-                // The reader who paid, not the person the reading is about.
-                userId: profile.userId,
-                feature: "compatibilityDetail",
-                resourceKey: creditKeys.compatibilityDetail(person.id, date),
-            }).catch((error: unknown) =>
-                fastify.log.error({ err: error, personId: person.id, date }, "Failed to refund credits")
-            );
-        }
-    })().catch((error: unknown) => fastify.log.error({ err: error, personId: person.id, date }, "Generation crashed"));
-}
-
 const notFound = {
     error: {
         code: "not_found",
@@ -502,28 +362,21 @@ export default (async (fastify) => {
      * Registered for this plugin but off by default, so only the generate route carries
      * it — reading a person must stay free. Keyed by person so one noisy relationship
      * cannot lock the others out.
+     *
+     * `preHandler`, because the key reads the body: in the default `onRequest` the body
+     * is not parsed yet, the person came back empty, and the limit was quietly shared by
+     * every person the reader has.
      */
     await fastify.register(rateLimit, {
         global: false,
+        hook: "preHandler",
         keyGenerator: async (request) => {
             const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
             const personId = (request.body as { compatibilityPersonId?: string } | undefined)?.compatibilityPersonId;
 
             return `${session?.user?.id ?? request.ip}:${personId ?? ""}`;
         },
-        errorResponseBuilder: (_request, context) => {
-            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
-
-            return {
-                statusCode: 429,
-                error: {
-                    hours: Math.floor(totalSeconds / 3600),
-                    minutes: Math.floor((totalSeconds % 3600) / 60),
-                    message: "You've reached the limit for now. Please try again later.",
-                    silent: true,
-                },
-            };
-        },
+        errorResponseBuilder,
     });
 
     /* ============================================================
@@ -593,7 +446,7 @@ export default (async (fastify) => {
                  * the day has no content and no live run.
                  */
                 if (access.unlocked && !person.content) {
-                    await generate(fastify, {
+                    await startCompatibilityGeneration(fastify, {
                         person,
                         profile: session.profile,
                         date,
@@ -611,17 +464,7 @@ export default (async (fastify) => {
                     }),
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to get compatibility person");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to get compatibility person");
             }
         }
     );
@@ -635,10 +478,11 @@ export default (async (fastify) => {
         {
             /**
              * The only endpoint here that spends money on demand. Keyed per person, not
-             * per user: three an hour covers a real failure worth retrying, and someone
-             * with ten people must not exhaust the budget of the other nine.
+             * per user: five an hour covers the purchase plus a real failure worth
+             * retrying, and someone with eight people must not exhaust the budget of the
+             * other seven.
              */
-            config: { rateLimit: { max: 3, timeWindow: "1 hour" } },
+            config: { rateLimit: { max: 5, timeWindow: "1 hour" } },
             schema: {
                 body: z.object({
                     compatibilityPersonId: z.string().min(1),
@@ -717,7 +561,12 @@ export default (async (fastify) => {
                     });
                 }
 
-                await generate(fastify, { person, profile: session.profile, date, allowFailed: true });
+                await startCompatibilityGeneration(fastify, {
+                    person,
+                    profile: session.profile,
+                    date,
+                    allowFailed: true,
+                });
 
                 const claimed = await loadPersonWithScore(fastify.db, {
                     userId: session.user.id,
@@ -743,17 +592,7 @@ export default (async (fastify) => {
                     }),
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to generate compatibility overview");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to generate compatibility overview");
             }
         }
     );

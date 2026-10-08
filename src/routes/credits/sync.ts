@@ -1,17 +1,24 @@
 import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
-import { sql } from "drizzle-orm";
-import { FastifyInstance, FastifyPluginAsync } from "fastify";
+import { inArray, sql } from "drizzle-orm";
+import { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { subscriptions } from "../../db/schema";
+import { creditLedger, subscriptions } from "../../db/schema";
 import { env } from "../../env";
 import { auth } from "../../lib/auth";
-import { fetchPurchases, fetchSubscriptions } from "../../modules/credits/revenuecatApi";
+import {
+    fetchPurchases,
+    fetchSubscriptions,
+    RemotePurchase,
+    RemoteSubscription,
+} from "../../modules/credits/revenuecatApi";
 import { linkCustomer, replayParkedEvents } from "../../modules/credits/revenuecatApply";
 import { ACCRUAL_INTERVAL_SECONDS, getCreditState, grantCredits } from "../../modules/credits/service";
 import { CREDIT_FEATURES, SUBSCRIPTION_STATUSES } from "../../modules/credits/types";
+import { sendInternalError } from "../../utils/errors";
+import { errorResponseBuilder } from "../../utils/rateLimitResponse";
 import { errorSchema } from "../../utils/zodResponse";
 
 /**
@@ -58,20 +65,35 @@ const responseSchema = z.object({
     }),
 });
 
+interface RemoteView {
+    subscriptions: RemoteSubscription[];
+    purchases: RemotePurchase[];
+}
+
 /**
- * Pulls RevenueCat's own view and writes anything newer than what we hold.
+ * RevenueCat's own view of the customer.
+ *
+ * Read-only, so it starts before the local replay rather than after it — the two are
+ * the slow halves of a sync, and neither needs the other to begin.
+ */
+async function fetchRemoteView(appUserId: string): Promise<RemoteView> {
+    const [remoteSubscriptions, remotePurchases] = await Promise.all([
+        fetchSubscriptions(appUserId),
+        fetchPurchases(appUserId),
+    ]);
+
+    return { subscriptions: remoteSubscriptions, purchases: remotePurchases };
+}
+
+/**
+ * Writes anything in RevenueCat's view newer than what we hold.
  *
  * Failure here is not fatal: the parked-event replay has already run, and the webhook
  * remains the durable path. Degrading to "we did what we could locally" is better than
  * a 500 on a screen the reader is waiting on.
  */
-async function reconcile(fastify: FastifyInstance, input: { appUserId: string; userId: string }): Promise<boolean> {
-    const [remoteSubscriptions, remotePurchases] = await Promise.all([
-        fetchSubscriptions(input.appUserId),
-        fetchPurchases(input.appUserId),
-    ]);
-
-    for (const remote of remoteSubscriptions) {
+async function applyRemoteView(fastify: FastifyInstance, input: { userId: string; remote: RemoteView }) {
+    for (const remote of input.remote.subscriptions) {
         if (remote.environment === "SANDBOX" && !env.REVENUECAT_ALLOW_SANDBOX) {
             continue;
         }
@@ -105,8 +127,36 @@ async function reconcile(fastify: FastifyInstance, input: { appUserId: string; u
             });
     }
 
-    for (const purchase of remotePurchases) {
-        if (purchase.environment === "SANDBOX" && !env.REVENUECAT_ALLOW_SANDBOX) {
+    const purchases = input.remote.purchases.filter(
+        (purchase) => purchase.environment !== "SANDBOX" || env.REVENUECAT_ALLOW_SANDBOX
+    );
+
+    if (purchases.length === 0) {
+        return;
+    }
+
+    /**
+     * RevenueCat answers with every pack the customer has ever bought, and granting each
+     * one is a transaction of its own — so a reader with a long history paid for all of
+     * it on every sync, one round trip after another. Asking once which of them are
+     * already in the ledger leaves only the new ones, which after a purchase is one.
+     *
+     * Only a shortcut: the idempotency key still decides. A webhook landing between
+     * this read and the grant below loses to it exactly as before.
+     */
+    const keys = purchases.map((purchase) => `purchase:${purchase.transactionId}`);
+
+    const granted = await fastify.db
+        .select({ key: creditLedger.idempotencyKey })
+        .from(creditLedger)
+        .where(inArray(creditLedger.idempotencyKey, keys));
+
+    const already = new Set(granted.map((row) => row.key));
+
+    for (const purchase of purchases) {
+        const idempotencyKey = `purchase:${purchase.transactionId}`;
+
+        if (already.has(idempotencyKey)) {
             continue;
         }
 
@@ -119,54 +169,57 @@ async function reconcile(fastify: FastifyInstance, input: { appUserId: string; u
             userId: input.userId,
             amount: purchase.credits,
             reason: "purchase",
-            idempotencyKey: `purchase:${purchase.transactionId}`,
+            idempotencyKey,
             metadata: { source: "sync", productId: purchase.productId },
         });
     }
+}
 
-    return true;
+type Session = Awaited<ReturnType<typeof auth.api.getSession>>;
+
+/**
+ * The session the rate limiter already looked up, so the handler does not ask again.
+ *
+ * A WeakMap rather than a request decoration: it is this route's business alone, and
+ * it lets go of the request with the request.
+ */
+const sessions = new WeakMap<FastifyRequest, Session>();
+
+async function sessionOf(request: FastifyRequest): Promise<Session> {
+    if (sessions.has(request)) {
+        return sessions.get(request) ?? null;
+    }
+
+    const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+
+    sessions.set(request, session);
+
+    return session;
 }
 
 export default (async (fastify) => {
     await fastify.register(rateLimit, {
         global: false,
         keyGenerator: async (request) => {
-            const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+            const session = await sessionOf(request);
 
             return session?.user?.id ?? request.ip;
         },
-        errorResponseBuilder: (_request, context) => {
-            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
-
-            return {
-                statusCode: 429,
-                error: {
-                    hours: Math.floor(totalSeconds / 3600),
-                    minutes: Math.floor((totalSeconds % 3600) / 60),
-                    message: "You've reached the limit for now. Please try again later.",
-                    silent: true,
-                },
-            };
-        },
+        errorResponseBuilder,
     });
 
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/sync",
         {
             /**
-             * Generous enough for the two moments that matter — after a purchase and
-             * after a restore — and mean enough that a client loop cannot turn this into
-             * a proxy for RevenueCat's API.
+             * Never stands between a reader and a purchase: the store has already
+             * charged by the time this runs, and the webhook grants the credits anyway —
+             * a 429 here only delays them. The limit is for scripts holding a session,
+             * which could otherwise turn this into a proxy for RevenueCat's project-wide
+             * API quota; sixty confirmed purchases an hour is not a person.
              */
-            config: { rateLimit: { max: 10, timeWindow: "1 hour" } },
+            config: { rateLimit: { max: 60, timeWindow: "1 hour" } },
             schema: {
-                body: z.object({
-                    /**
-                     * The id the SDK is configured with. Never a receipt and never an
-                     * entitlement: everything that decides access is fetched server-side.
-                     */
-                    appUserId: z.string().min(1),
-                }),
                 response: {
                     200: responseSchema,
                     401: errorSchema,
@@ -175,7 +228,7 @@ export default (async (fastify) => {
             },
         },
         async (request, reply) => {
-            const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+            const session = await sessionOf(request);
 
             if (!session) {
                 return reply.status(401).send({
@@ -184,23 +237,52 @@ export default (async (fastify) => {
             }
 
             const userId = session.user.id;
-            const { appUserId } = request.body;
 
             try {
-                // Whoever the SDK says they are, they are this reader. Recorded first, so
-                // the replay below can find anything parked under that id.
-                await linkCustomer(fastify.db, { appUserIds: [appUserId, userId], userId });
+                /**
+                 * Started first and awaited last: it is network-bound and touches nothing
+                 * local, so it runs while the replay below does. Caught here rather than
+                 * where it is awaited, so a failure cannot surface as an unhandled
+                 * rejection while the replay is still going.
+                 */
+                const remote = fetchRemoteView(userId).catch((error: unknown) => {
+                    request.log.warn({ err: error, userId }, "RevenueCat fetch failed, replay still applied");
+
+                    return null;
+                });
+
+                /**
+                 * The session is the only identity this route trusts. The SDK is logged in
+                 * with the same id, so anything bought or restored on this device is
+                 * already filed under it; an id taken from the body would let any reader
+                 * claim someone else's RevenueCat customer, and with it their purchases.
+                 */
+                await linkCustomer(fastify.db, { appUserIds: [userId], userId });
 
                 const replayedEvents = await replayParkedEvents(fastify.db, {
-                    appUserIds: [appUserId, userId],
+                    appUserIds: [userId],
                     userId,
                 });
 
-                const reconciled = await reconcile(fastify, { appUserId, userId }).catch((error: unknown) => {
-                    request.log.warn({ err: error, appUserId }, "RevenueCat reconcile failed, replay still applied");
+                /**
+                 * Applied only after the replay, so a parked event and the pull of the same
+                 * purchase still meet in the order they always have.
+                 */
+                const view = await remote;
 
-                    return false;
-                });
+                const reconciled =
+                    view !== null &&
+                    (await applyRemoteView(fastify, { userId, remote: view }).then(
+                        () => true,
+                        (error: unknown) => {
+                            request.log.warn(
+                                { err: error, userId },
+                                "RevenueCat reconcile failed, replay still applied"
+                            );
+
+                            return false;
+                        }
+                    ));
 
                 const state = await getCreditState(fastify.db, userId);
 
@@ -229,17 +311,7 @@ export default (async (fastify) => {
                     },
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to sync credits");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to sync credits");
             }
         }
     );

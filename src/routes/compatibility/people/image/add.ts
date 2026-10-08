@@ -1,3 +1,4 @@
+import rateLimit from "@fastify/rate-limit";
 import { fromNodeHeaders } from "better-auth/node";
 import { and, eq } from "drizzle-orm";
 import { FastifyPluginAsync } from "fastify";
@@ -7,12 +8,32 @@ import { z } from "zod";
 import { compatibilityPeople } from "../../../../db/schema";
 import { auth } from "../../../../lib/auth";
 import { deleteImage, getKeyFromUrl, MAX_IMAGE_SIZE, SUPPORTED_IMAGE_TYPES, uploadImage } from "../../../../lib/r2";
-import { takeUniqueOrThrow } from "../../../../utils/drizzleUtils";
+import { sendInternalError } from "../../../../utils/errors";
+import { errorResponseBuilder } from "../../../../utils/rateLimitResponse";
 
 export default (async (fastify) => {
+    /**
+     * Registered for this plugin but off by default, so only the route below carries it.
+     */
+    await fastify.register(rateLimit, {
+        global: false,
+        keyGenerator: async (request) => {
+            const session = await auth.api.getSession({ headers: fromNodeHeaders(request.headers) });
+
+            return session?.user?.id ?? request.ip;
+        },
+        errorResponseBuilder,
+    });
+
     fastify.withTypeProvider<ZodTypeProvider>().post(
         "/add",
         {
+            /**
+             * Every upload is a write to R2. Keyed per reader, not per person like the
+             * update beside it: the person's id arrives inside the multipart body, which
+             * is not parsed yet when the limit is checked. Matches `people/add`.
+             */
+            config: { rateLimit: { max: 24, timeWindow: "1 day" } },
             schema: {
                 response: {
                     200: z.object({
@@ -32,7 +53,7 @@ export default (async (fastify) => {
                             message: z.string(),
                         }),
                     }),
-                    409: z.object({
+                    404: z.object({
                         error: z.object({
                             code: z.string(),
                             message: z.string(),
@@ -61,14 +82,28 @@ export default (async (fastify) => {
                 });
             }
 
+            /**
+             * `request.file()` throws on anything that is not multipart, and the catch
+             * below would turn the client's mistake into a 500. It is the same mistake
+             * as an empty upload, so it gets the same answer.
+             */
+            if (!request.isMultipart()) {
+                return reply.status(400).send({
+                    error: {
+                        code: "image_not_provided",
+                        message: "No image file provided.",
+                    },
+                });
+            }
+
             try {
                 const file = await request.file();
 
                 if (!file) {
-                    return reply.status(409).send({
+                    return reply.status(400).send({
                         error: {
                             code: "image_not_provided",
-                            message: "No image file provided",
+                            message: "No image file provided.",
                         },
                     });
                 }
@@ -83,8 +118,8 @@ export default (async (fastify) => {
                 ) {
                     return reply.status(400).send({
                         error: {
-                            code: "compatibility_person_not_found",
-                            message: "Compatibility person not found",
+                            code: "validation_error",
+                            message: "compatibilityPersonId: Required.",
                         },
                     });
                 }
@@ -99,13 +134,13 @@ export default (async (fastify) => {
                             eq(compatibilityPeople.userId, session.user.id)
                         )
                     )
-                    .then(takeUniqueOrThrow);
+                    .then((rows) => rows[0]);
 
                 if (!compativilityPerson) {
-                    return reply.status(409).send({
+                    return reply.status(404).send({
                         error: {
                             code: "compatibility_person_not_found",
-                            message: "Compatibility person not found",
+                            message: "Compatibility person not found.",
                         },
                     });
                 }
@@ -114,12 +149,32 @@ export default (async (fastify) => {
                     return reply.status(400).send({
                         error: {
                             code: "unsupported_image_type",
-                            message: `Unsupported image type: ${file.mimetype}. Supported: ${SUPPORTED_IMAGE_TYPES.join(", ")}`,
+                            message: "Unsupported image type.",
                         },
                     });
                 }
 
-                const imageBuffer = await file.toBuffer();
+                /**
+                 * The multipart plugin enforces MAX_IMAGE_SIZE while streaming and throws
+                 * once it is crossed, so an oversized upload never reaches the length
+                 * check below — that stays only as a backstop.
+                 */
+                let imageBuffer: Buffer;
+
+                try {
+                    imageBuffer = await file.toBuffer();
+                } catch (error: unknown) {
+                    if (error instanceof fastify.multipartErrors.RequestFileTooLargeError) {
+                        return reply.status(400).send({
+                            error: {
+                                code: "image_too_large",
+                                message: `Image too large. Maximum size: ${MAX_IMAGE_SIZE / 1024 / 1024}MB`,
+                            },
+                        });
+                    }
+
+                    throw error;
+                }
 
                 if (imageBuffer.length > MAX_IMAGE_SIZE) {
                     return reply.status(400).send({
@@ -163,17 +218,7 @@ export default (async (fastify) => {
                     },
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to list compatibility people");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to list compatibility people");
             }
         }
     );

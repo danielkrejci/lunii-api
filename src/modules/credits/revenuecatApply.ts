@@ -1,7 +1,7 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { FastifyInstance } from "fastify";
 
-import { revenuecatCustomers, revenuecatEvents, subscriptions } from "../../db/schema";
+import { revenuecatCustomers, revenuecatEvents, subscriptions, user } from "../../db/schema";
 import { env } from "../../env";
 import {
     candidateAppUserIds,
@@ -15,6 +15,7 @@ import { grantCredits } from "./service";
 import { RevenuecatEventStatus } from "./types";
 
 type Db = FastifyInstance["db"];
+type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 /**
  * Doing what `interpretEvent` decided.
@@ -75,6 +76,23 @@ export async function resolveUser(db: Db, event: RevenuecatEvent): Promise<strin
     }
 
     return null;
+}
+
+/** Our users behind these RevenueCat ids, through the alias table or by being one of them. */
+async function usersForAppUserIds(db: Db | DbTransaction, appUserIds: string[]): Promise<string[]> {
+    const ids = appUserIds.filter((appUserId) => !isAnonymousAppUserId(appUserId));
+
+    if (ids.length === 0) {
+        return [];
+    }
+
+    const mapped = await db
+        .select({ userId: revenuecatCustomers.userId })
+        .from(revenuecatCustomers)
+        .where(inArray(revenuecatCustomers.appUserId, ids));
+    const direct = await db.select({ userId: user.id }).from(user).where(inArray(user.id, ids));
+
+    return [...new Set([...mapped, ...direct].map((row) => row.userId))];
 }
 
 /** Records every alias as belonging to one user, so a later event resolves at once. */
@@ -160,11 +178,34 @@ export async function applyEvent(
 
         case "transfer": {
             /**
-             * The purchase moved to a different App User ID — a restore on a fresh
-             * install, which for an anonymous reader is the only way back to what they
-             * bought. Re-point every alias, and move the subscription with them.
+             * The purchase moved to a different App User ID — a restore on another
+             * account, or on a fresh install. Whoever it moved away from stops being
+             * entitled now: RevenueCat sends every later event to the new owner, so
+             * nothing would ever close the old row and the old account would keep
+             * unlimited until the paid period ran out, or forever without an expiry.
+             *
+             * Decided from the event's own two sides rather than from `userId`, which
+             * is whichever of them `resolveUser` happened to find. The receiving side is
+             * not written here: its subscription comes from the sync the restore
+             * triggers, and its non-anonymous ids are our user ids, which resolve
+             * without an alias. Neither side's aliases move — pointing one of our user
+             * ids at someone else would hand that account's next purchase to them.
              */
-            await linkCustomer(db, { appUserIds: [...intent.from, ...intent.to], userId });
+            const at = eventTimestamp(event);
+
+            await db.transaction(async (tx) => {
+                const receiving = await usersForAppUserIds(tx, intent.to);
+                const losing = (await usersForAppUserIds(tx, intent.from)).filter((id) => !receiving.includes(id));
+
+                if (losing.length === 0) {
+                    return;
+                }
+
+                await tx
+                    .update(subscriptions)
+                    .set({ status: "expired", expiresAt: at, willRenew: false, lastEventAt: at, lastEventId: event.id })
+                    .where(and(inArray(subscriptions.userId, losing), sql`${subscriptions.lastEventAt} <= ${at}`));
+            });
 
             return "processed";
         }

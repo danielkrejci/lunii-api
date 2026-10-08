@@ -7,7 +7,7 @@ import { z } from "zod";
 import { compatibilityPeople, compatibilityPeopleScores } from "../../../db/schema";
 import { auth } from "../../../lib/auth";
 import { deleteImage, getKeyFromUrl } from "../../../lib/r2";
-import { takeUniqueOrThrow } from "../../../utils/drizzleUtils";
+import { sendInternalError } from "../../../utils/errors";
 
 export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(
@@ -27,7 +27,7 @@ export default (async (fastify) => {
                             message: z.string(),
                         }),
                     }),
-                    409: z.object({
+                    404: z.object({
                         error: z.object({
                             code: z.string(),
                             message: z.string(),
@@ -67,13 +67,13 @@ export default (async (fastify) => {
                             eq(compatibilityPeople.userId, session.user.id)
                         )
                     )
-                    .then(takeUniqueOrThrow);
+                    .then((rows) => rows[0]);
 
                 if (!compativilityPerson) {
-                    return reply.status(409).send({
+                    return reply.status(404).send({
                         error: {
                             code: "compatibility_person_not_found",
-                            message: "Compatibility person not found",
+                            message: "Compatibility person not found.",
                         },
                     });
                 }
@@ -106,17 +106,7 @@ export default (async (fastify) => {
                     data: true,
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to remove compatibility person");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to remove compatibility person");
             }
         }
     );

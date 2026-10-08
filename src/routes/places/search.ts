@@ -7,11 +7,16 @@ import { z } from "zod";
 
 import { env } from "../../env";
 import { auth } from "../../lib/auth";
-import { serializeDrizzleData } from "../../utils/drizzleUtils";
+import { sendInternalError } from "../../utils/errors";
+import { errorResponseBuilder } from "../../utils/rateLimitResponse";
 
 export default (async (fastify) => {
     await fastify.register(rateLimit, {
-        max: 100,
+        /**
+         * Onboarding, every person added or edited and the reader's own birth place all
+         * search through here, a handful of debounced requests each.
+         */
+        max: 200,
         timeWindow: "1 day",
         keyGenerator: async (request) => {
             const session = await auth.api.getSession({
@@ -19,18 +24,7 @@ export default (async (fastify) => {
             });
             return session?.user?.id ?? request.ip;
         },
-        errorResponseBuilder: (_request, context) => {
-            const totalSeconds = Math.floor((context?.ttl ?? 0) / 1000);
-            return {
-                statusCode: 429,
-                error: {
-                    hours: Math.floor(totalSeconds / 3600),
-                    minutes: Math.floor((totalSeconds % 3600) / 60),
-                    message: "You've reached the limit for now. Please try again later.",
-                    silent: true,
-                },
-            };
-        },
+        errorResponseBuilder,
     });
 
     fastify.withTypeProvider<ZodTypeProvider>().post(
@@ -194,8 +188,13 @@ export default (async (fastify) => {
 
                 const filteredResults = results.filter((item) => item.lat !== undefined && item.lng !== undefined);
 
+                /**
+                 * Sent as PlaceKit typed it. Run through `serializeDrizzleData` this used to
+                 * turn any numeric-looking string — a query of "1", a place named "15" —
+                 * into a number, and the response schema answered with a 500.
+                 */
                 return reply.status(200).send({
-                    data: serializeDrizzleData({
+                    data: {
                         results: filteredResults.map((r) => ({
                             name: r.name,
                             highlight: r.highlight,
@@ -208,20 +207,10 @@ export default (async (fastify) => {
                         resultsCount: filteredResults.length,
                         maxResults,
                         query,
-                    }),
-                });
-            } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to search places");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
                     },
                 });
+            } catch (error: unknown) {
+                return sendInternalError(request, reply, error, "Failed to search places");
             }
         }
     );

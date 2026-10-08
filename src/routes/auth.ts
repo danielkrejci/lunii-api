@@ -6,6 +6,7 @@ import z from "zod";
 
 import { profile } from "../db/schema";
 import { auth } from "../lib/auth";
+import { sendInternalError } from "../utils/errors";
 
 export default (async (fastify: FastifyInstance) => {
     const authHandler = toNodeHandler(auth.handler);
@@ -61,17 +62,7 @@ export default (async (fastify: FastifyInstance) => {
                     data: true,
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to update notification token");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to update notification token");
             }
         }
     );
@@ -107,7 +98,9 @@ export default (async (fastify: FastifyInstance) => {
                         reply.raw.writeHead(500, { "content-type": "application/json" });
                     }
                     if (!reply.raw.writableEnded) {
-                        reply.raw.end(JSON.stringify({ error: { message: "Internal Server Error" } }));
+                        reply.raw.end(
+                            JSON.stringify({ error: { code: "internal_error", message: "Internal Server Error" } })
+                        );
                     }
                 }
             },

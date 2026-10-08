@@ -13,6 +13,7 @@ import {
     softDeleteConversation,
 } from "../../modules/chat/service";
 import { CHAT_MESSAGE_STATUSES, CHAT_ROLES } from "../../modules/chat/types";
+import { sendInternalError } from "../../utils/errors";
 import { errorSchema } from "../../utils/zodResponse";
 
 /**
@@ -108,11 +109,7 @@ export default (async (fastify) => {
                     },
                 });
             } catch (error: unknown) {
-                request.log.error({ err: error }, "Failed to list conversations");
-
-                return reply.status(500).send({
-                    error: { code: "error", message: "Internal Server Error" },
-                });
+                return sendInternalError(request, reply, error, "Failed to list conversations");
             }
         }
     );
@@ -190,11 +187,7 @@ export default (async (fastify) => {
                     },
                 });
             } catch (error: unknown) {
-                request.log.error({ err: error }, "Failed to read a conversation");
-
-                return reply.status(500).send({
-                    error: { code: "error", message: "Internal Server Error" },
-                });
+                return sendInternalError(request, reply, error, "Failed to read a conversation");
             }
         }
     );
@@ -238,11 +231,7 @@ export default (async (fastify) => {
 
                 return reply.status(200).send({ data: true });
             } catch (error: unknown) {
-                request.log.error({ err: error }, "Failed to delete a conversation");
-
-                return reply.status(500).send({
-                    error: { code: "error", message: "Internal Server Error" },
-                });
+                return sendInternalError(request, reply, error, "Failed to delete a conversation");
             }
         }
     );

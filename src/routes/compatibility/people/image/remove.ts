@@ -7,7 +7,7 @@ import { z } from "zod";
 import { compatibilityPeople } from "../../../../db/schema";
 import { auth } from "../../../../lib/auth";
 import { deleteImage, getKeyFromUrl } from "../../../../lib/r2";
-import { takeUniqueOrThrow } from "../../../../utils/drizzleUtils";
+import { sendInternalError } from "../../../../utils/errors";
 
 export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(
@@ -22,6 +22,12 @@ export default (async (fastify) => {
                         data: z.boolean(),
                     }),
                     401: z.object({
+                        error: z.object({
+                            code: z.string(),
+                            message: z.string(),
+                        }),
+                    }),
+                    404: z.object({
                         error: z.object({
                             code: z.string(),
                             message: z.string(),
@@ -44,7 +50,7 @@ export default (async (fastify) => {
             if (!session) {
                 return reply.status(401).send({
                     error: {
-                        code: "Unauthorized",
+                        code: "unauthorized",
                         message: "User must be logged in to access this resource.",
                     },
                 });
@@ -61,7 +67,16 @@ export default (async (fastify) => {
                             eq(compatibilityPeople.userId, session.user.id)
                         )
                     )
-                    .then(takeUniqueOrThrow);
+                    .then((rows) => rows[0]);
+
+                if (!compativilityPerson) {
+                    return reply.status(404).send({
+                        error: {
+                            code: "compatibility_person_not_found",
+                            message: "Compatibility person not found.",
+                        },
+                    });
+                }
 
                 // remove the image from R2 storage if one exists
                 if (compativilityPerson.image) {
@@ -89,17 +104,7 @@ export default (async (fastify) => {
                     data: true,
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to list compatibility people");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to list compatibility people");
             }
         }
     );

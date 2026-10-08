@@ -1070,17 +1070,45 @@ Field requirements:
   One practical opportunity, activity or recommendation for today (max 150 characters).
 
 - opportunity.examples:
-  Array of exactly 4 short words or phrases representing today's recommended activities or themes.
-  Examples:
-  ["Networking", "Exercise", "Creative work", "Reading"]
+  Array of exactly 4 short phrases, 1-4 words each: things worth doing today.
+
+  At least 3 of the 4 must be CONCRETE ACTIVITIES — something the reader could put in
+  their calendar or simply go and do this afternoon. "A walk", "Coffee with friends",
+  "Gardening", "Learning something new", "A day trip", "A good meal", "Tidying up the
+  desk", "Calling a parent", "A long bath", "Cooking for someone".
+
+  At most 1 may be a broader theme, and even that must be something you DO ("Important
+  decisions", "Starting a project") — never a quality or a trait. "Leadership",
+  "Self-expression", "Creativity", "Balance" and "Growth" are not activities; nobody
+  can go and do them, so they are never allowed.
+
+  Pick them from today's theme and transits, not from a list of nice things: a day
+  about slowing down gets "A walk" and "A good book", a day about reaching out gets
+  "Coffee with friends" and "Calling a parent". Vary them — if all four would suit any
+  day, start again.
+
+  Examples of the register:
+  ["A walk in nature", "Coffee with friends", "Important decisions", "Cooking at home"]
 
 - watchOut.description:
   One practical warning about what to avoid today (max 150 characters).
 
 - watchOut.examples:
-  Array of exactly 4 short words or phrases representing things to avoid today.
-  Examples:
-  ["Arguments", "Overspending", "Procrastination", "Impulsive decisions"]
+  Array of exactly 4 short phrases, 1-4 words each: things worth postponing or
+  avoiding today.
+
+  The same rule as above: at least 3 of the 4 must be CONCRETE ACTIVITIES OR SITUATIONS
+  the reader could actually walk into — "Big purchases", "Signing contracts", "Late
+  nights", "Heavy meals", "Crowded events", "Arguing over messages", "Overtime",
+  "Lending money". At most 1 may be a broader pattern ("Impulsive decisions"), and never
+  a feeling or a trait — "Stress", "Negativity" or "Insecurity" cannot be avoided by
+  deciding to.
+
+  Derive them from today's difficult transits, so they are genuinely worth postponing
+  today and not cautions that would be true on any day.
+
+  Examples of the register:
+  ["Big purchases", "Arguing over messages", "Late nights", "Impulsive decisions"]
 
 - deepInsight:
   The long read: what today is like for them, where it will show up, and what to do

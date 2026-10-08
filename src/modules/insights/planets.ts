@@ -5,10 +5,12 @@ import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageU
 import { getLLMJson, parseLLMJson } from "../../utils/stringUtils";
 import { toResponseJsonSchema } from "../../utils/zodResponse";
 import { Planet, PLANETS } from "../astro";
+import { TransitChart } from "../astro/types";
 import { PlanetInfluence as PlanetWeight } from "../dailyScore/types";
 import { PLANET_PROFILES } from "./planetProfiles";
 import { buildReaderBlock, Reader } from "./reader";
-import { REASON_RULES, VOICE_RULES } from "./voice";
+import { SIGN_PROFILES } from "./signProfiles";
+import { VOICE_RULES } from "./voice";
 
 const MODEL = "gemini-2.5-flash";
 
@@ -25,8 +27,15 @@ const PRICE_PER_MILLION = { input: 0.3, output: 2.5 };
 export interface PlanetInsightContent {
     planets: {
         name: Planet;
-        description: string;
-        reason: string;
+        /**
+         * The reading itself: what this body does for the reader today, and why.
+         *
+         * One text rather than a description and a separate reason, the same way the Moon
+         * screen does it — split in two they read as the same thing said twice, and the
+         * two fields together were most of the output for every body on every day.
+         * One entry per paragraph.
+         */
+        insight: string[];
         /**
          * Keyed by contact id rather than positional: the wording was written for one
          * day's aspects, and a contact that has moved on must simply have no wording.
@@ -58,8 +67,11 @@ const answerSchema = z.object({
     planets: z.array(
         z.object({
             name: z.enum(PLANETS),
-            description: z.string(),
-            reason: z.string(),
+            /**
+             * One entry per paragraph. Asked for as a single string with blank lines in
+             * it, the decoder returns one unbroken paragraph — see the Moon prompt.
+             */
+            insight: z.array(z.string()),
             contacts: z.array(z.object({ id: z.string(), title: z.string(), description: z.string() })),
         })
     ),
@@ -69,10 +81,17 @@ const answerSchema = z.object({
    PROMPT
 ============================================================ */
 
-function buildBodies(planets: PlanetWeight[]): string {
+function buildBodies(planets: PlanetWeight[], transits: TransitChart): string {
     return planets
         .map((planet) => {
             const profile = PLANET_PROFILES[planet.name];
+            /**
+             * Where the body stands today. Without it the model had nothing to say about
+             * the planet itself and wrote about the bodies it touches instead.
+             */
+            const position = transits[planet.name];
+            const motion =
+                position.retrograde === undefined ? "" : position.retrograde ? ", retrograde" : ", moving direct";
 
             const contacts =
                 planet.contacts.length > 0
@@ -91,6 +110,8 @@ function buildBodies(planets: PlanetWeight[]): string {
             return `
 ${profile.displayName} (id: ${planet.name})
 Weight today: ${planet.score}/100, from ${planet.aspects} aspect${planet.aspects === 1 ? "" : "s"}
+Today it stands in: ${position.sign}${motion}
+Qualities that sign lends it: ${SIGN_PROFILES[position.sign].keywords.join(", ")}
 Meaning: ${profile.description}
 Keywords: ${profile.keywords.join(", ")}
 Today's contacts:
@@ -101,6 +122,7 @@ ${contacts}`;
 
 export function buildPrompt(input: {
     planets: PlanetWeight[];
+    transits: TransitChart;
     readerBlock: string;
     teaser: DailyTeaser | null;
     language: string;
@@ -151,14 +173,15 @@ HOW TO WRITE IT
 
 ${VOICE_RULES}
 
---------------------------------------------------
-EXPLANATION FIELDS ("reason")
---------------------------------------------------
+Name the planets and the sign, never the geometry. The body's sign and the reader's
+planets it touches are what the reader came to learn, so name them plainly. Say what the
+contact does in plain words — a planet can be "pressing on", "supporting", "pulling
+against" or "pulling in the same direction as" one of theirs. Never name the angle
+itself: no oppositions, squares, conjunctions, trines or sextiles, and no "natal", no
+houses, no Ascendant — the contact's exact name sits right below the text already.
 
-${REASON_RULES}
-
-These rules govern every field except one. "planets[].contacts[].title" is the aspect's
-name, so it names the angle; nothing else in this answer does.
+"planets[].contacts[].title" is the single exception in the whole answer: it is the
+aspect's name, so it names the angle. Nothing else does.
 
 ==================================================
 TODAY'S PLANETS
@@ -182,7 +205,7 @@ background influence rather than the main event.
 Low exactness (below roughly 40%) means it is barely in effect. Mention it only if
 nothing else is happening for that body.
 
-When one body has several contacts, let the most exact one lead the description, and
+When one body has several contacts, let the most exact one lead the insight, and
 use the others only where they genuinely change the picture. Never state the orb or
 the percentage — translate them into how present the influence feels.
 
@@ -190,7 +213,12 @@ Each contact is listed as:
 
   id | English label | "English title" | orb, exactness, direction
 
-${buildBodies(input.planets)}
+In every contact the body under which it is listed is the one MOVING today ("Transit");
+the other is a fixed point in the reader's birth chart ("Natal"). "Transit Mars square
+Natal Venus" means Mars is pressing on the reader's own Venus — Mars acts, their Venus is
+what gets touched. Never turn it around and write as if the natal planet were acting.
+
+${buildBodies(input.planets, input.transits)}
 ${teaserBlock}
 ${input.readerBlock}
 
@@ -204,8 +232,10 @@ Return ONLY valid JSON.
     "planets": [
         {
             "name": "sun",
-            "description": "string",
-            "reason": "string",
+            "insight": [
+                "string",
+                "string"
+            ],
             "contacts": [
                 {
                     "id": "string",
@@ -224,15 +254,35 @@ Return ONLY valid JSON.
   order, and copy each "id" character for character. A body with no contacts gets an
   empty "contacts" array.
 
-- planets[].description:
-  Exactly 3 paragraphs separated by a blank line, 600–1000 characters in total, about
-  TODAY only. First what the influence does in everyday life, then why it is stronger
-  or weaker than usual. Never name aspects, signs or astrological jargon here.
+- planets[].insight:
+  The whole reading for that body, as 2–3 paragraphs — ONE PARAGRAPH PER ARRAY ENTRY.
+  Never put a line break inside an entry and never return the whole reading as a single
+  entry. Together the entries run at most 750 characters, about TODAY only.
 
-- planets[].reason:
-  Exactly 2 paragraphs separated by a blank line, 250–450 characters in total. Which
-  planets this one is working with or against today, and what that does to the reader.
-  Follow the explanation rules above — no aspect names here either.
+  Build it as a movement, not as labelled sections. Never write a heading, a bullet or
+  a label, and never announce the structure ("here is why", "the reason is").
+
+  The text is about THIS body. Name it in the first sentence and keep it the subject of
+  the whole reading — the reader opened Mars to read about Mars. The other planets
+  appear only as what this one is touching.
+
+  First paragraph: where the body is now and what that means. Name the sign it stands
+  in, and say whether it is retrograde when it is. Then what that sign does to this
+  planet's theme today — how its drive, voice, warmth or pressure shows up in everyday
+  life.
+
+  Second paragraph: what it touches in the reader's chart. Name the strongest contact
+  or two: which of THEIR planets it reaches ("your Venus", "your own Moon"), whether it
+  supports or presses on it, and what that changes for them today — concrete, something
+  they will notice. A body with no contacts today gets this paragraph about why it is
+  quiet and what that leaves room for.
+
+  An optional third paragraph closes on what to do with it. Leave it out rather than
+  repeat yourself.
+
+  Never write a heading, a bullet or a label, and never announce the structure ("here is
+  why", "the reason is"). Each paragraph must carry the text further — one that restates
+  the previous in other words is a failure.
 
 - planets[].contacts[].title:
   The aspect's NAME, translated: the second field of its line, the one that reads
@@ -302,6 +352,8 @@ ${input.language}`;
 export async function generatePlanetInsights(input: {
     /** Per-body weights from the engine. The model interprets them, never rescores them. */
     planets: PlanetWeight[];
+    /** Where each body stands today: its sign and whether it is retrograde. */
+    transits: TransitChart;
     reader: Reader;
     /** Today's horoscope, or null when it is not written yet. */
     teaser: DailyTeaser | null;
@@ -365,6 +417,7 @@ export async function generatePlanetInsights(input: {
  */
 export function buildPlanetInsightsRequest(input: {
     planets: PlanetWeight[];
+    transits: TransitChart;
     reader: Reader;
     teaser: DailyTeaser | null;
     languageIso: string;
@@ -373,6 +426,7 @@ export function buildPlanetInsightsRequest(input: {
 
     const prompt = buildPrompt({
         planets: input.planets,
+        transits: input.transits,
         // The panel is about the chart's bodies, so the placements the reader block names
         // come from the contacts on show rather than from the day's strongest impacts.
         readerBlock: buildReaderBlock(
@@ -436,8 +490,7 @@ export function readPlanetInsightsAnswer(
 
                 return {
                     name: planet.name,
-                    description: written?.description ?? PLANET_PROFILES[planet.name].description,
-                    reason: written?.reason ?? planet.contacts.map((contact) => contact.reason).join(", "),
+                    insight: written?.insight ?? [PLANET_PROFILES[planet.name].description],
                     aspects: Object.fromEntries(
                         planet.contacts.map((contact) => {
                             const wording = written?.contacts?.find((entry) => entry.id === contact.id);

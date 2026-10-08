@@ -34,4 +34,11 @@ export const creditKeys = {
      * purchase — which is the intended behaviour, not an accident of the key.
      */
     compatibilityPerson: (personId: string) => personId,
+
+    /**
+     * One edit, named by the id the client minted for it. Every edit is its own purchase,
+     * so the key carries no date and no field — only what makes a retried tap the same
+     * edit rather than a second one.
+     */
+    profileUpdate: (requestId: string) => requestId,
 };

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { auth } from "../../lib/auth";
 import { ACCRUAL_INTERVAL_SECONDS, getCreditState } from "../../modules/credits/service";
 import { CREDIT_FEATURES, SUBSCRIPTION_STATUSES } from "../../modules/credits/types";
+import { sendInternalError } from "../../utils/errors";
 import { errorSchema } from "../../utils/zodResponse";
 
 /**
@@ -108,17 +109,7 @@ export default (async (fastify) => {
                     },
                 });
             } catch (error: unknown) {
-                const isDev = process.env.NODE_ENV !== "production";
-
-                request.log.error({ err: error }, "Failed to read credit state");
-
-                return reply.status(500).send({
-                    error: {
-                        code: "error",
-                        message:
-                            isDev && error instanceof Error ? (error.stack ?? error.message) : "Internal Server Error",
-                    },
-                });
+                return sendInternalError(request, reply, error, "Failed to read credit state");
             }
         }
     );

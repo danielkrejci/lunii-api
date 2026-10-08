@@ -17,6 +17,7 @@ export const CREDIT_COSTS = {
     planetInsight: 2,
     compatibilityDetail: 5,
     compatibilityPerson: 10,
+    profileUpdate: 10,
 } as const satisfies Record<CreditFeature, number>;
 
 /**
