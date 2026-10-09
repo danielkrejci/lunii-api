@@ -27,33 +27,40 @@ import { MoonInsightContent } from "../modules/moon/ai";
 import { MoonVariant } from "../modules/moon/today";
 import { Gender, Relationship, TransitAspects, TransitPlanets, ZodiacSign } from "../utils/natalUtils";
 
-export const aiGenerations = pgTable("ai_generations", {
-    id: text()
-        .primaryKey()
-        .notNull()
-        .$defaultFn(() => crypto.randomUUID()),
-    createdAt: timestamp("created_at").defaultNow().notNull(),
-    userId: text("user_id")
-        .notNull()
-        .references(() => user.id, { onDelete: "cascade" }),
-    requestId: text("request_id").notNull(),
-    provider: text("provider").notNull(),
-    model: text("model").notNull(),
-    type: text("type")
-        .$type<
-            "dailyInsight" | "moonInsight" | "planetInsight" | "compatibilityPeople" | "personalityProfile" | "chat"
-        >()
-        .notNull(),
-    status: text("status").$type<"success" | "error">().notNull(),
-    error: text("error"),
-    input: jsonb("input").notNull(),
-    output: jsonb("output"),
-    inputTokens: numeric("input_tokens", { mode: "number" }).notNull(),
-    outputTokens: numeric("output_tokens", { mode: "number" }).notNull(),
-    total_tokens: numeric("total_tokens", { mode: "number" }).notNull(),
-    latencyMs: numeric("latency_ms", { mode: "number" }).notNull(),
-    cost: numeric("cost", { mode: "number" }).notNull(),
-});
+export const aiGenerations = pgTable(
+    "ai_generations",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        createdAt: timestamp("created_at").defaultNow().notNull(),
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+        requestId: text("request_id").notNull(),
+        provider: text("provider").notNull(),
+        model: text("model").notNull(),
+        type: text("type")
+            .$type<
+                "dailyInsight" | "moonInsight" | "planetInsight" | "compatibilityPeople" | "personalityProfile" | "chat"
+            >()
+            .notNull(),
+        status: text("status").$type<"success" | "error">().notNull(),
+        error: text("error"),
+        input: jsonb("input").notNull(),
+        output: jsonb("output"),
+        inputTokens: numeric("input_tokens", { mode: "number" }).notNull(),
+        outputTokens: numeric("output_tokens", { mode: "number" }).notNull(),
+        total_tokens: numeric("total_tokens", { mode: "number" }).notNull(),
+        latencyMs: numeric("latency_ms", { mode: "number" }).notNull(),
+        cost: numeric("cost", { mode: "number" }).notNull(),
+    },
+    (table) => [
+        index("ai_generations_created_at_idx").on(table.createdAt),
+        index("ai_generations_type_created_at_idx").on(table.type, table.createdAt),
+    ]
+);
 
 export const chatConversations = pgTable(
     "chat_conversations",

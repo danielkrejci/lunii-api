@@ -1,0 +1,2 @@
+CREATE INDEX "ai_generations_created_at_idx" ON "ai_generations" USING btree ("created_at");--> statement-breakpoint
+CREATE INDEX "ai_generations_type_created_at_idx" ON "ai_generations" USING btree ("type","created_at");
