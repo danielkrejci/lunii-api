@@ -1,20 +1,10 @@
-import fs from "node:fs";
-
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 
-import { dbEnv } from "./env/dbEnv";
+import { connectionString, ssl } from "./db/connection";
 
-const url = new URL(dbEnv.DATABASE_URL);
-["sslmode", "sslrootcert"].forEach((k) => url.searchParams.delete(k));
-
-const sql = postgres(url.toString(), {
-    max: 1,
-    ssl: {
-        ca: fs.readFileSync("./ca-certificate.crt", "utf8"),
-    },
-});
+const sql = postgres(connectionString, { max: 1, ssl });
 const db = drizzle(sql);
 
 async function main() {
