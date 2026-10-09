@@ -8,20 +8,20 @@ import { importPKCS8, SignJWT } from "jose";
 import { db } from "../db";
 import * as schema from "../db/schema";
 import { account, profile } from "../db/schema";
-import { env } from "../env";
+import { appEnv } from "../env";
 
 export async function generateAppleClientSecret() {
-    const key = await importPKCS8(env.APPLE_PRIVATE_KEY, "ES256");
+    const key = await importPKCS8(appEnv.APPLE_PRIVATE_KEY, "ES256");
 
     const now = Math.floor(Date.now() / 1000);
 
     return await new SignJWT({})
         .setProtectedHeader({
             alg: "ES256",
-            kid: env.APPLE_KEY_ID,
+            kid: appEnv.APPLE_KEY_ID,
         })
-        .setIssuer(env.APPLE_TEAM_ID)
-        .setSubject(env.APPLE_CLIENT_ID)
+        .setIssuer(appEnv.APPLE_TEAM_ID)
+        .setSubject(appEnv.APPLE_CLIENT_ID)
         .setAudience("https://appleid.apple.com")
         .setIssuedAt(now)
         .setExpirationTime(now + 180 * 24 * 60 * 60)
@@ -115,16 +115,16 @@ const config = {
         provider: "pg",
         schema: schema,
     }),
-    baseURL: env.BETTER_AUTH_URL,
+    baseURL: appEnv.BETTER_AUTH_URL,
     socialProviders: {
         google: {
-            clientId: env.GOOGLE_CLIENT_ID,
-            clientSecret: env.GOOGLE_CLIENT_SECRET,
+            clientId: appEnv.GOOGLE_CLIENT_ID,
+            clientSecret: appEnv.GOOGLE_CLIENT_SECRET,
         },
         apple: async () => ({
-            clientId: env.APPLE_CLIENT_ID,
+            clientId: appEnv.APPLE_CLIENT_ID,
             clientSecret: await generateAppleClientSecret(),
-            appBundleIdentifier: env.APPLE_APP_BUNDLE_IDENTIFIER,
+            appBundleIdentifier: appEnv.APPLE_APP_BUNDLE_IDENTIFIER,
         }),
     },
     session: {

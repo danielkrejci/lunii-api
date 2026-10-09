@@ -5,7 +5,7 @@ import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { env } from "../../env";
+import { appEnv } from "../../env";
 import { auth } from "../../lib/auth";
 import { sendInternalError } from "../../utils/errors";
 import { errorResponseBuilder } from "../../utils/rateLimitResponse";
@@ -178,7 +178,7 @@ export default (async (fastify) => {
             //     },
             // });
 
-            const pk = placekit(env.PLACEKIT_API_KEY);
+            const pk = placekit(appEnv.PLACEKIT_API_KEY);
 
             try {
                 const { results, maxResults, query } = await pk.search(request.body.query, {

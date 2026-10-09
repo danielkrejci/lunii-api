@@ -3,11 +3,11 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { PgColumn } from "drizzle-orm/pg-core";
 import { Pool } from "pg";
 
-import { env } from "../env";
+import { appEnv } from "../env";
 import * as schema from "./schema";
 
 export const pool = new Pool({
-    connectionString: env.POSTGRES_URL,
+    connectionString: appEnv.DATABASE_URL,
     max: 5,
     ssl: true,
     keepAlive: true,

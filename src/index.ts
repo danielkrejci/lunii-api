@@ -27,7 +27,7 @@ import {
     ZodTypeProvider,
 } from "fastify-type-provider-zod";
 
-import { env } from "./env";
+import { appEnv } from "./env";
 import { beginShutdown, runInBackground, runningBackgroundTasks } from "./lib/backgroundTasks";
 import { MAX_IMAGE_SIZE } from "./lib/r2";
 import {
@@ -224,7 +224,7 @@ try {
     process.exit(1);
 }
 
-if (env.ENABLE_CRON_JOBS === true) {
+if (appEnv.ENABLE_CRON_JOBS === true) {
     // create transit job
     const job = createTransitJob(fastify.db);
 

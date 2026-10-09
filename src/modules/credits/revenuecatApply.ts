@@ -2,7 +2,7 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { FastifyInstance } from "fastify";
 
 import { revenuecatCustomers, revenuecatEvents, subscriptions, user } from "../../db/schema";
-import { env } from "../../env";
+import { appEnv } from "../../env";
 import {
     candidateAppUserIds,
     eventEnvironment,
@@ -119,7 +119,7 @@ export async function applyEvent(
     input: { event: RevenuecatEvent; userId: string }
 ): Promise<RevenuecatEventStatus> {
     const { event, userId } = input;
-    const intent = interpretEvent(event, { allowSandbox: env.REVENUECAT_ALLOW_SANDBOX });
+    const intent = interpretEvent(event, { allowSandbox: appEnv.REVENUECAT_ALLOW_SANDBOX });
 
     switch (intent.kind) {
         case "ignore":

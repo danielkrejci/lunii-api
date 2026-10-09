@@ -1,12 +1,17 @@
 import { createEnv } from "@t3-oss/env-nextjs";
 import { z } from "zod";
 
-// Also loads `.env.local`, before anything below reads `process.env`.
-import { databaseEnv } from "./databaseEnv";
+export const dbEnv = createEnv({
+    server: {
+        DATABASE_URL: z.url(),
+    },
+    client: {},
+    experimental__runtimeEnv: {},
+});
 
-export const env = createEnv({
+export const appEnv = createEnv({
     // Postgres
-    extends: [databaseEnv],
+    extends: [dbEnv],
     server: {
         // Better Auth
         BETTER_AUTH_SECRET: z.string().min(1),

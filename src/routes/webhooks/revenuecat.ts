@@ -4,7 +4,7 @@ import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { env } from "../../env";
+import { appEnv } from "../../env";
 import { RevenuecatEvent } from "../../modules/credits/revenuecat";
 import { applyEvent, markEvent, recordEvent, resolveUser } from "../../modules/credits/revenuecatApply";
 import { errorSchema } from "../../utils/zodResponse";
@@ -48,7 +48,7 @@ function isAuthorized(header: string | undefined): boolean {
         return false;
     }
 
-    const secret = env.REVENUECAT_WEBHOOK_SECRET;
+    const secret = appEnv.REVENUECAT_WEBHOOK_SECRET;
     const bare = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : header;
 
     return matches(header, secret) || matches(bare, secret);

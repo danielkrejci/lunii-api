@@ -5,7 +5,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { db, pool } from "../../db";
 import { creditAccounts, creditLedger, creditUnlocks, subscriptions, user } from "../../db/schema";
-import { env } from "../../env";
+import { appEnv } from "../../env";
 import { CREDIT_COSTS } from "./costs";
 import { grantCredits, refundUnlock, spendCredits } from "./service";
 import { CREDIT_CAP } from "./types";
@@ -27,7 +27,7 @@ const COST = CREDIT_COSTS.planetInsight;
  * outside `pnpm test` and the pre-commit hook. Run it with `pnpm test:db`.
  */
 
-const enabled = process.env.RUN_DB_TESTS === "1" && env.CREDITS_ENFORCED;
+const enabled = process.env.RUN_DB_TESTS === "1" && appEnv.CREDITS_ENFORCED;
 
 /** Every user this suite makes, so they can all be removed at the end. */
 const created: string[] = [];

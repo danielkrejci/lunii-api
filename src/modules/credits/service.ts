@@ -2,7 +2,7 @@ import { and, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { FastifyInstance } from "fastify";
 
 import { creditAccounts, creditLedger, creditUnlocks, subscriptions } from "../../db/schema";
-import { env } from "../../env";
+import { appEnv } from "../../env";
 import { accruedBalance, advancedAnchor, project } from "./accrual";
 import { ALL_COSTS, costOf, CREDIT_PACK_CATALOGUE, MAX_COMPATIBILITY_PEOPLE } from "./costs";
 import { CREDIT_CAP, CREDIT_REGEN_SECONDS, CreditFeature, CreditLedgerReason } from "./types";
@@ -161,7 +161,7 @@ export async function getCreditState(db: Db, userId: string): Promise<CreditStat
      * a paywall in front of content the server would hand over anyway.
      */
     const unlimited =
-        !env.CREDITS_ENFORCED ||
+        !appEnv.CREDITS_ENFORCED ||
         (subscription !== undefined &&
             (ENTITLING_STATUSES as readonly string[]).includes(subscription.status) &&
             (subscription.expiresAt === null || subscription.expiresAt.getTime() > Date.now()));
@@ -194,7 +194,7 @@ export async function checkAccess(
 ): Promise<AccessState> {
     const cost = costOf(input.feature);
 
-    if (!env.CREDITS_ENFORCED) {
+    if (!appEnv.CREDITS_ENFORCED) {
         return { unlocked: true, unlimited: true, cost, balance: null, affordable: true };
     }
 
@@ -246,7 +246,7 @@ export async function listUnlocked(
     }
 
     // Everything is open, and saying so here keeps the caller free of the distinction.
-    if (!env.CREDITS_ENFORCED || (await hasActiveSubscription(db, input.userId))) {
+    if (!appEnv.CREDITS_ENFORCED || (await hasActiveSubscription(db, input.userId))) {
         return new Set(input.resourceKeys);
     }
 
@@ -277,7 +277,7 @@ export async function spendCredits(
 ): Promise<SpendOutcome> {
     const cost = costOf(input.feature);
 
-    if (!env.CREDITS_ENFORCED) {
+    if (!appEnv.CREDITS_ENFORCED) {
         return { ok: true, reason: "disabled", cost: 0, balance: null };
     }
 
@@ -393,7 +393,7 @@ export async function refundUnlock(
     db: Db,
     input: { userId: string; feature: CreditFeature; resourceKey: string }
 ): Promise<number> {
-    if (!env.CREDITS_ENFORCED) {
+    if (!appEnv.CREDITS_ENFORCED) {
         return 0;
     }
 

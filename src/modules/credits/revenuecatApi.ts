@@ -1,4 +1,4 @@
-import { env } from "../../env";
+import { appEnv } from "../../env";
 import { CREDIT_PACKS, SUBSCRIPTION_PRODUCT_IDS } from "./costs";
 import { SubscriptionStatus } from "./types";
 
@@ -90,7 +90,7 @@ function storeIdentifiers(options: { refresh?: boolean } = {}): Promise<Map<stri
         return productMap.byId;
     }
 
-    const byId = getAll(`/projects/${env.REVENUECAT_PROJECT_ID}/products`).then((items) => {
+    const byId = getAll(`/projects/${appEnv.REVENUECAT_PROJECT_ID}/products`).then((items) => {
         const map = new Map<string, string>();
 
         for (const item of items) {
@@ -133,7 +133,7 @@ async function storeIdentifiersFor(productIds: string[]): Promise<Map<string, st
 async function get(path: string): Promise<unknown> {
     const response = await fetch(new URL(path, ORIGIN), {
         headers: {
-            authorization: `Bearer ${env.REVENUECAT_API_KEY}`,
+            authorization: `Bearer ${appEnv.REVENUECAT_API_KEY}`,
             accept: "application/json",
         },
         signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -191,7 +191,7 @@ function toEnvironment(value: unknown): "PRODUCTION" | "SANDBOX" {
 /** Every subscription RevenueCat holds for this customer. */
 export async function fetchSubscriptions(appUserId: string): Promise<RemoteSubscription[]> {
     const [items] = await Promise.all([
-        getAll(`/projects/${env.REVENUECAT_PROJECT_ID}/customers/${encodeURIComponent(appUserId)}/subscriptions`),
+        getAll(`/projects/${appEnv.REVENUECAT_PROJECT_ID}/customers/${encodeURIComponent(appUserId)}/subscriptions`),
         // Warmed alongside, so the common case still costs no extra wait.
         storeIdentifiers(),
     ]);
@@ -218,7 +218,7 @@ export async function fetchSubscriptions(appUserId: string): Promise<RemoteSubsc
 /** Every consumable RevenueCat holds for this customer that we know how to price. */
 export async function fetchPurchases(appUserId: string): Promise<RemotePurchase[]> {
     const [items] = await Promise.all([
-        getAll(`/projects/${env.REVENUECAT_PROJECT_ID}/customers/${encodeURIComponent(appUserId)}/purchases`),
+        getAll(`/projects/${appEnv.REVENUECAT_PROJECT_ID}/customers/${encodeURIComponent(appUserId)}/purchases`),
         // Warmed alongside, so the common case still costs no extra wait.
         storeIdentifiers(),
     ]);

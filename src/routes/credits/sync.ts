@@ -6,7 +6,7 @@ import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
 import { creditLedger, subscriptions } from "../../db/schema";
-import { env } from "../../env";
+import { appEnv } from "../../env";
 import { auth } from "../../lib/auth";
 import {
     fetchPurchases,
@@ -94,7 +94,7 @@ async function fetchRemoteView(appUserId: string): Promise<RemoteView> {
  */
 async function applyRemoteView(fastify: FastifyInstance, input: { userId: string; remote: RemoteView }) {
     for (const remote of input.remote.subscriptions) {
-        if (remote.environment === "SANDBOX" && !env.REVENUECAT_ALLOW_SANDBOX) {
+        if (remote.environment === "SANDBOX" && !appEnv.REVENUECAT_ALLOW_SANDBOX) {
             continue;
         }
 
@@ -128,7 +128,7 @@ async function applyRemoteView(fastify: FastifyInstance, input: { userId: string
     }
 
     const purchases = input.remote.purchases.filter(
-        (purchase) => purchase.environment !== "SANDBOX" || env.REVENUECAT_ALLOW_SANDBOX
+        (purchase) => purchase.environment !== "SANDBOX" || appEnv.REVENUECAT_ALLOW_SANDBOX
     );
 
     if (purchases.length === 0) {
