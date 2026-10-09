@@ -1,4 +1,4 @@
-import { appEnv } from "../../env";
+import { appEnv } from "../../env/appEnv";
 import { CREDIT_PACKS, SUBSCRIPTION_PRODUCT_IDS } from "./costs";
 import { SubscriptionStatus } from "./types";
 

@@ -4,7 +4,7 @@ import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { appEnv } from "../../env";
+import { appEnv } from "../../env/appEnv";
 import { RevenuecatEvent } from "../../modules/credits/revenuecat";
 import { applyEvent, markEvent, recordEvent, resolveUser } from "../../modules/credits/revenuecatApply";
 import { errorSchema } from "../../utils/zodResponse";

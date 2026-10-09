@@ -5,7 +5,7 @@ import { eq, sql } from "drizzle-orm";
 
 import { db, pool } from "../../db";
 import { creditAccounts, creditLedger, creditUnlocks, subscriptions, user } from "../../db/schema";
-import { appEnv } from "../../env";
+import { appEnv } from "../../env/appEnv";
 import { CREDIT_COSTS } from "./costs";
 import { grantCredits, refundUnlock, spendCredits } from "./service";
 import { CREDIT_CAP } from "./types";

@@ -4,7 +4,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import postgres from "postgres";
 
-import { dbEnv } from "./env";
+import { dbEnv } from "./env/dbEnv";
 
 const url = new URL(dbEnv.DATABASE_URL);
 ["sslmode", "sslrootcert"].forEach((k) => url.searchParams.delete(k));

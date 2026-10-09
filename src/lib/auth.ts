@@ -8,7 +8,7 @@ import { importPKCS8, SignJWT } from "jose";
 import { db } from "../db";
 import * as schema from "../db/schema";
 import { account, profile } from "../db/schema";
-import { appEnv } from "../env";
+import { appEnv } from "../env/appEnv";
 
 export async function generateAppleClientSecret() {
     const key = await importPKCS8(appEnv.APPLE_PRIVATE_KEY, "ES256");

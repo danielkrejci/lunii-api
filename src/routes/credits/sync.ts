@@ -6,7 +6,7 @@ import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
 import { creditLedger, subscriptions } from "../../db/schema";
-import { appEnv } from "../../env";
+import { appEnv } from "../../env/appEnv";
 import { auth } from "../../lib/auth";
 import {
     fetchPurchases,

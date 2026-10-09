@@ -2,7 +2,7 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { FastifyInstance } from "fastify";
 
 import { revenuecatCustomers, revenuecatEvents, subscriptions, user } from "../../db/schema";
-import { appEnv } from "../../env";
+import { appEnv } from "../../env/appEnv";
 import {
     candidateAppUserIds,
     eventEnvironment,

@@ -27,7 +27,7 @@ import {
     ZodTypeProvider,
 } from "fastify-type-provider-zod";
 
-import { appEnv } from "./env";
+import { appEnv } from "./env/appEnv";
 import { beginShutdown, runInBackground, runningBackgroundTasks } from "./lib/backgroundTasks";
 import { MAX_IMAGE_SIZE } from "./lib/r2";
 import {

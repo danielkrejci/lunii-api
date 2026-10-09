@@ -5,7 +5,7 @@ import { FastifyPluginAsync } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 
-import { appEnv } from "../../env";
+import { appEnv } from "../../env/appEnv";
 import { auth } from "../../lib/auth";
 import { sendInternalError } from "../../utils/errors";
 import { errorResponseBuilder } from "../../utils/rateLimitResponse";

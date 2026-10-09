@@ -2,7 +2,7 @@ import { and, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import { FastifyInstance } from "fastify";
 
 import { creditAccounts, creditLedger, creditUnlocks, subscriptions } from "../../db/schema";
-import { appEnv } from "../../env";
+import { appEnv } from "../../env/appEnv";
 import { accruedBalance, advancedAnchor, project } from "./accrual";
 import { ALL_COSTS, costOf, CREDIT_PACK_CATALOGUE, MAX_COMPATIBILITY_PEOPLE } from "./costs";
 import { CREDIT_CAP, CREDIT_REGEN_SECONDS, CreditFeature, CreditLedgerReason } from "./types";
