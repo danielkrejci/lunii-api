@@ -9,6 +9,7 @@ import { db } from "../db";
 import * as schema from "../db/schema";
 import { account, profile } from "../db/schema";
 import { appEnv } from "../env/appEnv";
+import { deleteUserImages } from "../modules/profile/images";
 
 export async function generateAppleClientSecret() {
     const key = await importPKCS8(appEnv.APPLE_PRIVATE_KEY, "ES256");
@@ -36,6 +37,13 @@ const config = {
         },
         deleteUser: {
             enabled: true,
+            /**
+             * The cascades take every row, but not the photos in R2 those rows point at.
+             * Read before the delete, while the rows still say where the files are.
+             */
+            beforeDelete: async (user) => {
+                await deleteUserImages(user.id);
+            },
         },
     },
     account: {

@@ -11,6 +11,8 @@ import { z } from "zod";
 import { profile } from "../../db/schema";
 import { auth } from "../../lib/auth";
 import { computeNatalChart, EphemerisError } from "../../modules/astro";
+import { personalityContextSchema, personalityOverviewSchema } from "../../modules/personality/schema";
+import { deleteStoredImage, importProviderImage } from "../../modules/profile/images";
 import { isUniqueViolation, sendInternalError } from "../../utils/errors";
 import { Gender, Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
 
@@ -87,7 +89,13 @@ export default (async (fastify) => {
                         .max(3, "You can select up to 3 areas of interest."),
                     contentPreference: z.string().min(1, "Please select your content preference."),
                     beliefLevel: z.string().min(1, "Please select your belief level."),
-                    personalityProfile: z.string().min(1, "Please select your personality profile."),
+                    /**
+                     * As `personality-profile/generate` returned them. Checked against the
+                     * shapes rather than taken as strings: the client only relays them, so
+                     * anything else here was not written by the generation.
+                     */
+                    personalityProfile: personalityOverviewSchema,
+                    personalityContext: personalityContextSchema.nullable(),
                     personalityProfileInput: z.string().min(1, "Please select your personality profile input."),
                 }),
                 response: {
@@ -135,6 +143,9 @@ export default (async (fastify) => {
                 });
             }
 
+            // Declared out here so a failed insert can take the copied photo back out of R2.
+            let image: string | null = null;
+
             try {
                 // check if the user already has a profile
                 const profileData = await fastify.db.select().from(profile).where(eq(profile.userId, session.user.id));
@@ -159,9 +170,20 @@ export default (async (fastify) => {
                     timezone: detectedTimezone,
                 });
 
+                /**
+                 * A reader who signed up with Google starts with that photo. Only here, at
+                 * the one insert a reader ever gets: a photo they later remove stays
+                 * removed, and an anonymous reader who links Google afterwards has no
+                 * `user.image` to take it from.
+                 */
+                if (session.user.image) {
+                    image = await importProviderImage(session.user.id, session.user.image);
+                }
+
                 await fastify.db.insert(profile).values({
                     userId: session.user.id,
                     name: request.body.name,
+                    image,
                     referrer: request.body.referrer,
                     gender: request.body.gender as Gender,
                     birthDate: request.body.birthDate,
@@ -181,7 +203,8 @@ export default (async (fastify) => {
                     areasOfInterest: request.body.areasOfInterest,
                     contentPreference: request.body.contentPreference,
                     beliefLevel: request.body.beliefLevel,
-                    personalityProfile: request.body.personalityProfile,
+                    personalityProfile: JSON.stringify(request.body.personalityProfile),
+                    personalityContext: request.body.personalityContext,
                     birthChart,
                     personalityProfileInput: request.body.personalityProfileInput,
                 });
@@ -190,6 +213,10 @@ export default (async (fastify) => {
                     data: true,
                 });
             } catch (error: unknown) {
+                await deleteStoredImage(image).catch((cleanupError: unknown) =>
+                    request.log.error({ err: cleanupError }, "Failed to delete imported profile image")
+                );
+
                 if (error instanceof EphemerisError) {
                     request.log.error({ err: error }, "Failed to compute birth chart");
 

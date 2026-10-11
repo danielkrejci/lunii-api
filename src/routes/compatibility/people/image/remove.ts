@@ -104,7 +104,7 @@ export default (async (fastify) => {
                     data: true,
                 });
             } catch (error: unknown) {
-                return sendInternalError(request, reply, error, "Failed to list compatibility people");
+                return sendInternalError(request, reply, error, "Failed to remove compatibility person image");
             }
         }
     );

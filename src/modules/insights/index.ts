@@ -1659,7 +1659,7 @@ export function buildDailyInsightRequest(input: {
         birthChart: input.reader.birthChart,
         // Built from the day's strongest impacts, so the placements it names are the ones
         // today is actually landing on rather than the whole chart.
-        readerBlock: buildReaderBlock(input.reader, input.score.breakdown.top),
+        readerBlock: buildReaderBlock(input.reader, "daily", input.score.breakdown.top),
         language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
     });
 

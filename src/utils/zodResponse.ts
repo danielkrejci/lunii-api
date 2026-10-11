@@ -1,4 +1,4 @@
-import z from "zod";
+import { z } from "zod";
 
 export const errorSchema = z.object({
     error: z.object({
@@ -67,6 +67,40 @@ export const insufficientCreditsSchema = z.object({
  */
 export function toResponseJsonSchema(schema: z.ZodType): Record<string, unknown> {
     return stripUnsupportedKeywords(z.toJSONSchema(schema, { io: "output" })) as Record<string, unknown>;
+}
+
+/**
+ * The same, with `propertyOrdering` set on every object to the order the zod schema
+ * declares its keys in.
+ *
+ * Google documents property emission order as arbitrary unless this is set, and it is set
+ * per object rather than once for the whole answer. A nested answer whose later fields are
+ * written as a reading of the earlier ones needs it at every level, not only the top.
+ */
+export function toOrderedResponseJsonSchema(schema: z.ZodType): Record<string, unknown> {
+    return addPropertyOrdering(toResponseJsonSchema(schema)) as Record<string, unknown>;
+}
+
+function addPropertyOrdering(node: unknown): unknown {
+    if (Array.isArray(node)) {
+        return node.map((item) => addPropertyOrdering(item));
+    }
+
+    if (!node || typeof node !== "object") {
+        return node;
+    }
+
+    const ordered = Object.fromEntries(
+        Object.entries(node).map(([key, value]) => [key, addPropertyOrdering(value)])
+    ) as Record<string, unknown>;
+
+    const properties = ordered.properties;
+
+    if (ordered.type === "object" && properties && typeof properties === "object") {
+        ordered.propertyOrdering = Object.keys(properties);
+    }
+
+    return ordered;
 }
 
 function stripUnsupportedKeywords(node: unknown): unknown {

@@ -218,7 +218,7 @@ export default (async (fastify) => {
                     },
                 });
             } catch (error: unknown) {
-                return sendInternalError(request, reply, error, "Failed to list compatibility people");
+                return sendInternalError(request, reply, error, "Failed to add compatibility person image");
             }
         }
     );

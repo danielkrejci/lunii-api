@@ -1,6 +1,7 @@
 import { Gender } from "../../utils/natalUtils";
-import { humanizeEnum, humanizeEnums, parseLLMJson } from "../../utils/stringUtils";
+import { humanizeEnum, humanizeEnums } from "../../utils/stringUtils";
 import { NatalChart, NatalPoint, PERSONAL_POINTS } from "../astro";
+import { CONTEXT_CATEGORIES, ContextCategory, personalityContextSchema } from "../personality/schema";
 
 /**
  * The reader, as every prompt sees them.
@@ -18,8 +19,11 @@ export interface Reader {
     areasOfInterest: string[];
     beliefLevel: string;
     contentPreference: string;
-    /** The profile written at onboarding, as the JSON string it is stored as. */
-    personalityProfile: string;
+    /**
+     * The private analysis written with the profile. Typed loosely on purpose: it is
+     * read back from JSONB, and from onboarding it came through the client.
+     */
+    personalityContext: unknown;
     birthChart: NatalChart;
 }
 
@@ -35,61 +39,58 @@ export interface TouchedPoint {
 }
 
 /**
- * The one section of the profile a prompt should carry.
+ * What each kind of prompt takes from the personality context.
  *
- * Not the other two. The onboarding profile now opens with a section about the reader's
- * Sun sign and one about their Ascendant, and both are deliberately sign-level — half of
- * the second is spent explaining what an Ascendant even is. That is general where this
- * block needs particular: everyone born that month gets the same paragraph, and general
- * material here makes the horoscope reading it more generic, not less.
+ * Not the whole context: a prompt carries what bears on its own question, and every
+ * observation that does not is one more thing for the model to work in where it has no
+ * business. `points` pulls in observations about one body from any category — the Moon
+ * screen wants what the context says about the Moon, wherever it filed it.
  *
- * They also name placements outright, which every prompt reading this block forbids in its
- * own output. Vocabulary sitting in the context is the cheapest way to have it echoed.
- *
- * This section is the one written about the person rather than about a placement.
+ * The limit keeps the block a description of the reader rather than a second prompt.
+ * Chat's is higher: it is cached once per conversation and has to answer anything.
  */
-const USED_SECTION = "inYourLife";
+const FOCUS: Record<ReaderFocus, { categories: ContextCategory[]; points?: NatalPoint[]; limit: number }> = {
+    daily: { categories: ["corePatterns", "innerTensions"], limit: 6 },
+    planet: { categories: ["corePatterns"], limit: 5 },
+    moon: { categories: ["emotionalPatterns"], points: ["moon"], limit: 5 },
+    compatibility: { categories: ["relationshipPatterns", "innerTensions"], limit: 6 },
+    chat: { categories: ["corePatterns", "innerTensions", "emotionalPatterns", "relationshipPatterns"], limit: 8 },
+};
 
 /**
- * The stored profile, as the paragraphs a prompt should carry.
- *
- * Paragraphs rather than a shape on purpose: the caller's job — join what is worth quoting
- * into one run of prose — does not depend on how the profile is sectioned, and keeping
- * every shape question inside this function is what makes the next change to the profile a
- * change to one place. It has been restructured three times; the caller has not moved.
- *
- * An empty array covers the real cases and treats them alike: onboarding that failed and
- * stored empty strings, a row written before the column meant this, a shape nobody
- * recognises, and a client that put something else there — the column round-trips through
- * the client as an unvalidated string. A block that says "not available" is worse than no
- * block, so the caller drops it entirely.
+ * Which prompt the block is for, and therefore which part of the context it carries.
  */
-function readPersonality(stored: string): string[] {
-    // Checked before parsing rather than after: `parseLLMJson` reports a failure to the
-    // console, and an unfinished onboarding is an ordinary state, not an incident.
-    if (!stored.trim()) {
+export type ReaderFocus = "daily" | "planet" | "moon" | "compatibility" | "chat";
+
+/**
+ * The observations a prompt should carry, most relevant first.
+ *
+ * Observations about a point today is touching come first — they are the reason the
+ * reader's personality matters to this particular text — then the focus's own categories.
+ * The order is otherwise fixed by `CONTEXT_CATEGORIES`, so the same reader on the same
+ * question yields the same block: chat caches it.
+ *
+ * An empty array covers every case where there is nothing usable — a failed generation,
+ * a row written before the context existed, anything that does not parse — and the
+ * caller drops the block entirely. A block that says "not available" is worse than none.
+ */
+function selectContext(stored: unknown, focus: ReaderFocus, touched: NatalPoint[]): string[] {
+    const parsed = personalityContextSchema.safeParse(stored);
+
+    if (!parsed.success) {
         return [];
     }
 
-    const parsed = parseLLMJson<Record<string, unknown>>(stored);
+    const { categories, points = [], limit } = FOCUS[focus];
+    const wanted = new Set([...points, ...touched]);
+    const all = CONTEXT_CATEGORIES.flatMap((category) => parsed.data[category].map((item) => ({ category, item })));
 
-    // Arrays and scalars reach here too — `parseLLMJson` returns whatever parsed.
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return [];
-    }
+    const selected = [
+        ...all.filter(({ item }) => item.points.some((point) => wanted.has(point))),
+        ...all.filter(({ category }) => categories.includes(category)),
+    ].map(({ item }) => item.text.trim());
 
-    const section = parsed[USED_SECTION];
-
-    if (!Array.isArray(section)) {
-        return [];
-    }
-
-    // Per entry rather than all-or-nothing: one non-string in the array is not a reason to
-    // throw away the paragraphs either side of it.
-    return section
-        .filter((entry): entry is string => typeof entry === "string")
-        .map((entry) => entry.trim())
-        .filter(Boolean);
+    return [...new Set(selected)].filter(Boolean).slice(0, limit);
 }
 
 /**
@@ -143,7 +144,7 @@ function describeTouchedPlacements(birthChart: NatalChart, contacts: TouchedPoin
  * telling a model there is nothing personal about this reader is worse than not raising
  * the subject.
  */
-export function buildReaderBlock(reader: Reader, contacts: TouchedPoint[] = []): string {
+export function buildReaderBlock(reader: Reader, focus: ReaderFocus, contacts: TouchedPoint[] = []): string {
     const facts: string[] = [];
 
     const add = (label: string, value: string) => {
@@ -157,15 +158,19 @@ export function buildReaderBlock(reader: Reader, contacts: TouchedPoint[] = []):
     add("Relationship", humanizeEnum(reader.relationshipStatus));
     add("Cares about", humanizeEnums(reader.areasOfInterest).join(", "));
 
-    const personality = readPersonality(reader.personalityProfile);
+    const personality = selectContext(
+        reader.personalityContext,
+        focus,
+        contacts.map((contact) => contact.natal)
+    );
 
     const personalityBlock =
         personality.length > 0
             ? `
 
-How they work, from the profile they were given when they joined:
+How they work:
 
-${personality.join("\n\n")}`
+${personality.map((line) => `- ${line}`).join("\n")}`
             : "";
 
     const placements = describeTouchedPlacements(reader.birthChart, contacts);
@@ -211,9 +216,7 @@ will feel like being rushed" is right. "As a careful decision-maker, you may fee
 is wrong — it labels them instead of interpreting for them. The same goes for their
 relationship status and their career.
 
-Never quote or restate the profile above. They have already read it: it is the mechanism
-behind what you write, never the subject of it.
-
-It was written at signup, where naming the astrology is allowed, so it may name signs,
-planets and the Ascendant. You may not. That vocabulary belongs to it, not to you.${registerLine}`;
+Never quote or restate how they work. It is the app's private picture of them, not
+something they have read: it is the mechanism behind what you write, never the subject of
+it.${registerLine}`;
 }

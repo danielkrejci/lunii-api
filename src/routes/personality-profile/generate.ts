@@ -11,6 +11,7 @@ import { z } from "zod";
 import { auth } from "../../lib/auth";
 import { computeNatalChart, NatalChart } from "../../modules/astro";
 import { generatePersonalityProfile } from "../../modules/personality/generate";
+import { personalityContextSchema, personalityOverviewSchema } from "../../modules/personality/schema";
 import { sendInternalError } from "../../utils/errors";
 import { Gender, Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
 import { errorResponseBuilder } from "../../utils/rateLimitResponse";
@@ -114,7 +115,12 @@ export default (async (fastify) => {
                             sunSign: z.string(),
                             moonSign: z.string(),
                             risingSign: z.string().nullable(),
-                            personalityProfile: z.string(),
+                            /**
+                             * Both sent back by the client to `profile/add`, which stores
+                             * them: onboarding writes the profile before one exists.
+                             */
+                            personalityProfile: personalityOverviewSchema,
+                            personalityContext: personalityContextSchema.nullable(),
                             personalityProfileInput: z.string(),
                         }),
                     }),
@@ -194,32 +200,29 @@ export default (async (fastify) => {
                  */
                 const risingSign = chart.ascendant?.sign ?? null;
 
-                const { personalityProfile, personalityProfileInput, empty } = await generatePersonalityProfile(
-                    fastify,
-                    {
-                        userId: session.user.id,
-                        chart,
-                        hasBirthTime: request.body.birthTime !== null,
-                        sunSign: request.body.sunSign,
-                        risingSign,
-                        relationshipStatus: request.body.relationshipStatus,
-                        careerStage: request.body.careerStage,
-                        decisionStyle: request.body.decisionStyle,
-                        areasOfInterest: request.body.areasOfInterest,
-                        contentPreference: request.body.contentPreference,
-                        beliefLevel: request.body.beliefLevel,
-                        languageIso: request.body.language,
-                        gender: request.body.gender as Gender,
-                    }
-                );
+                const personality = await generatePersonalityProfile(fastify, {
+                    userId: session.user.id,
+                    chart,
+                    hasBirthTime: request.body.birthTime !== null,
+                    sunSign: request.body.sunSign as ZodiacSign,
+                    relationshipStatus: request.body.relationshipStatus,
+                    careerStage: request.body.careerStage,
+                    decisionStyle: request.body.decisionStyle,
+                    areasOfInterest: request.body.areasOfInterest,
+                    contentPreference: request.body.contentPreference,
+                    beliefLevel: request.body.beliefLevel,
+                    languageIso: request.body.language,
+                    gender: request.body.gender as Gender,
+                });
 
                 /**
-                 * An empty profile still completes onboarding: the sign-up is worth more
-                 * than the text, and the profile can be written again later. It is logged
-                 * loudly because everything downstream reads this column — a reader whose
-                 * profile is blank gets the generic half of every daily prompt.
+                 * A failed generation still completes onboarding: the sign-up is worth more
+                 * than the text, the screen still shows every computed fact, and the profile
+                 * can be written again later. It is logged loudly because everything
+                 * downstream reads the context — a reader without one gets the generic half
+                 * of every prompt.
                  */
-                if (!personalityProfile) {
+                if (!personality.context) {
                     request.log.error({ userId: session.user.id }, "Personality profile came back unusable twice");
                 }
 
@@ -228,8 +231,9 @@ export default (async (fastify) => {
                         sunSign: request.body.sunSign,
                         moonSign,
                         risingSign,
-                        personalityProfile: personalityProfile ?? empty,
-                        personalityProfileInput,
+                        personalityProfile: personality.overview,
+                        personalityContext: personality.context,
+                        personalityProfileInput: personality.input,
                     },
                 });
             } catch (error: unknown) {

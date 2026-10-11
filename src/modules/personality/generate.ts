@@ -4,15 +4,39 @@ import { z } from "zod";
 import { aiGenerations } from "../../db/schema";
 import { ai } from "../../lib/ai";
 import { buildPromptLanguageRule, getLanguageByIso } from "../../utils/languageUtils";
-import { Gender } from "../../utils/natalUtils";
+import { Gender, ZodiacSign } from "../../utils/natalUtils";
 import { humanizeEnum, humanizeEnums, parseLLMJson } from "../../utils/stringUtils";
-import { toResponseJsonSchema } from "../../utils/zodResponse";
-import { findNatalAspects, NatalAspect, NatalChart } from "../astro";
+import { toOrderedResponseJsonSchema } from "../../utils/zodResponse";
+import {
+    Balance,
+    dominantElement,
+    dominantModality,
+    Element,
+    findNatalAspects,
+    KeyPlacement,
+    Modality,
+    NatalAspect,
+    NatalChart,
+    NatalPoint,
+    NATAL_POINTS,
+    selectKeyPlanets,
+} from "../astro";
 import { VOICE_RULES } from "../insights/voice";
+import {
+    CONTEXT_CATEGORIES,
+    CONTEXT_ITEMS_PER_CATEGORY,
+    ContextCategory,
+    PersonalityContext,
+    PersonalityOverview,
+} from "./schema";
 
 /**
- * The reader's personality profile: the one text written about who they are rather than
- * about a day.
+ * The reader's personality profile, which is two things written in one call.
+ *
+ * The Cosmic Overview is what they see: a card per placement and a closing synthesis.
+ * The Personality Context is what they never see: the fuller analysis every other prompt
+ * reads to know who it is writing for. Kept apart because the screen wants short and
+ * the prompts want depth, and shortening one to fit the other loses either way.
  *
  * Lives here rather than in its route because two callers write it: onboarding, before
  * a profile exists, and the profile update, which rewrites it when the chart, the
@@ -33,63 +57,129 @@ const PRICE_PER_MILLION = { input: 0.3, output: 2.5 };
  */
 const NATAL_ASPECT_LIMIT = 5;
 
-/**
- * The sections, as the model must return them.
- *
- * Keyed to placements rather than to rhetorical jobs, and this is the one route in the app
- * that is allowed to name and explain the astrology: the reader has just arrived, came with
- * the question "what does my sign say about me", and nothing else here answers it.
- *
- * The key ORDER is load-bearing and not cosmetic. The third section is written as a reading
- * of the first two together, which only works if it is written after them; `propertyOrdering`
- * at the call site is what holds the decoder to that. Do not reorder these.
- *
- * Handed to the decoder as a response schema, so an answer that does not fit stops being
- * possible instead of being caught afterwards — this used to fall back to empty strings
- * and store them without anyone noticing.
- */
-const answerSchema = z.object({
-    /**
-     * Every section is paragraphs, following `deepInsight` in modules/insights: the array is
-     * the paragraph structure, and a section returned as one entry renders as a wall.
-     */
-    yourSign: z.array(z.string()),
-    yourAscendant: z.array(z.string()),
-    inYourLife: z.array(z.string()),
-});
+/* ============================================================
+   FACTS
+============================================================ */
 
 /**
- * No birth time, no Ascendant, and therefore no second section — not an empty one.
+ * Everything on the screen that is counted rather than written.
  *
- * Handing the decoder a schema without the key is what makes the section impossible rather
- * than merely discouraged. `risingSign` is nullable in the database for the same reason an
- * Ascendant without a birth time would be a fabrication, and `profile/add` refuses a second
- * call, so a placeholder written here would be the profile that reader has permanently.
+ * Worked out here and handed to the model as given, so the labels the reader sees are the
+ * same on every rewrite and never something the model miscounted.
  */
-const answerSchemaWithoutAscendant = answerSchema.omit({ yourAscendant: true });
+export interface ProfileFacts {
+    sunSign: ZodiacSign;
+    moonSign: ZodiacSign;
+    risingSign: ZodiacSign | null;
+    element: Balance<Element>;
+    modality: Balance<Modality>;
+    keyPlanets: KeyPlacement[];
+}
 
-type PersonalityProfile = z.infer<typeof answerSchema>;
-type PersonalityProfileWithoutAscendant = z.infer<typeof answerSchemaWithoutAscendant>;
-
-/**
- * Which of the two shapes this reader gets, decided by whether they gave a birth time.
- *
- * One place rather than three: the response schema, the property order and the parse all
- * have to agree, and they drifted apart the moment they were written out separately.
- */
-function profileShape(risingSign: string | null) {
-    if (risingSign) {
-        return {
-            schema: answerSchema,
-            ordering: ["yourSign", "yourAscendant", "inYourLife"],
-            empty: { yourSign: [], yourAscendant: [], inYourLife: [] } satisfies PersonalityProfile,
-        };
-    }
-
+export function computeProfileFacts(input: {
+    chart: NatalChart;
+    aspects: NatalAspect[];
+    sunSign: ZodiacSign;
+}): ProfileFacts {
     return {
-        schema: answerSchemaWithoutAscendant,
-        ordering: ["yourSign", "inYourLife"],
-        empty: { yourSign: [], inYourLife: [] } satisfies PersonalityProfileWithoutAscendant,
+        sunSign: input.sunSign,
+        moonSign: input.chart.moon.sign,
+        // Absent without a birth time: the Ascendant would be an artefact of an assumed noon.
+        risingSign: input.chart.ascendant?.sign ?? null,
+        element: dominantElement(input.chart),
+        modality: dominantModality(input.chart),
+        keyPlanets: selectKeyPlanets(input.chart, input.aspects),
+    };
+}
+
+/* ============================================================
+   ANSWER SHAPE
+============================================================ */
+
+/**
+ * The answer, as the decoder must return it, built for this one chart.
+ *
+ * Built per call rather than declared once because two parts of it depend on the chart:
+ * a reader with no birth time has no Rising card — the key is absent, so the card is
+ * impossible rather than merely discouraged — and the planet cards are keyed by exactly
+ * the three planets selected above, so the model cannot write about a fourth.
+ *
+ * The ORDER is load-bearing: the context is written first, so the cards and the signature
+ * are distilled from an analysis that already exists rather than improvised; the signature
+ * is last because it is a reading of everything above it. `toOrderedResponseJsonSchema`
+ * holds the decoder to that order at every level.
+ */
+export function buildAnswerSchema(facts: ProfileFacts) {
+    const points = NATAL_POINTS.filter((point) => point !== "ascendant" || facts.risingSign !== null);
+
+    const item = z.object({
+        text: z.string().min(1),
+        points: z.array(z.enum(points as [NatalPoint, ...NatalPoint[]])).min(1),
+    });
+
+    const context = z.object(
+        Object.fromEntries(
+            CONTEXT_CATEGORIES.map((category) => [category, z.array(item).max(CONTEXT_ITEMS_PER_CATEGORY)])
+        ) as Record<ContextCategory, z.ZodArray<typeof item>>
+    );
+
+    const placement = z.object({ keyword: z.string().min(1), text: z.string().min(1) });
+    const line = z.object({ text: z.string().min(1) });
+
+    const overview = z.object({
+        sun: placement,
+        moon: placement,
+        ...(facts.risingSign ? { rising: placement } : {}),
+        element: line,
+        modality: line,
+        planets: z.object(Object.fromEntries(facts.keyPlanets.map(({ planet }) => [planet, line]))),
+    });
+
+    return z.object({
+        context,
+        overview,
+        signature: z.object({ summary: z.array(z.string().min(1)).min(2).max(3) }),
+    });
+}
+
+type Answer = {
+    context: PersonalityContext;
+    overview: {
+        sun: { keyword: string; text: string };
+        moon: { keyword: string; text: string };
+        rising?: { keyword: string; text: string };
+        element: { text: string };
+        modality: { text: string };
+        planets: Record<string, { text: string }>;
+    };
+    signature: { summary: string[] };
+};
+
+function card(sign: ZodiacSign, written?: { keyword: string; text: string }) {
+    return { sign, keyword: written?.keyword.trim() ?? "", text: written?.text.trim() ?? "" };
+}
+
+/**
+ * The screen, assembled from the facts and whatever the model wrote.
+ *
+ * With no answer every text is empty and every fact is still there: the screen still
+ * shows the reader's signs, element and planets, which is better than the blank
+ * profile a failed generation used to leave behind.
+ */
+export function buildOverview(facts: ProfileFacts, answer: Answer | null): PersonalityOverview {
+    return {
+        sun: card(facts.sunSign, answer?.overview.sun),
+        moon: card(facts.moonSign, answer?.overview.moon),
+        rising: facts.risingSign ? card(facts.risingSign, answer?.overview.rising) : null,
+        element: { ...facts.element, text: answer?.overview.element.text.trim() ?? "" },
+        modality: { ...facts.modality, text: answer?.overview.modality.text.trim() ?? "" },
+        keyPlanets: facts.keyPlanets.map((placement) => ({
+            ...placement,
+            text: answer?.overview.planets[placement.planet]?.text.trim() ?? "",
+        })),
+        signature: {
+            summary: (answer?.signature.summary ?? []).map((paragraph) => paragraph.trim()).filter(Boolean),
+        },
     };
 }
 
@@ -111,11 +201,16 @@ function describeNatalAspects(aspects: NatalAspect[]): string {
         .join("\n");
 }
 
+function describeDistribution(balance: Balance<string>): string {
+    return Object.entries(balance.distribution)
+        .map(([key, weight]) => `${key} ${weight}`)
+        .join(", ");
+}
+
 export function buildPrompt(input: {
     chart: NatalChart;
     aspects: NatalAspect[];
-    sunSign: string;
-    risingSign: string | null;
+    facts: ProfileFacts;
     relationshipStatus: string;
     careerStage: string;
     decisionStyle: string;
@@ -124,49 +219,25 @@ export function buildPrompt(input: {
     beliefLevel: string;
     language: string;
 }): string {
-    const { chart } = input;
+    const { chart, facts } = input;
 
     const decisionStyle = humanizeEnum(input.decisionStyle);
     const careerStage = humanizeEnum(input.careerStage);
     const relationshipStatus = humanizeEnum(input.relationshipStatus);
     const interests = humanizeEnums(input.areasOfInterest).join(", ");
 
+    const keyPlanets = facts.keyPlanets
+        .map(({ planet, sign, retrograde }) => `${planet} in ${sign}${retrograde ? " (retrograde)" : ""}`)
+        .join(", ");
+
     /**
-     * The Ascendant section, or nothing at all.
-     *
-     * Without a birth time the Ascendant is an artefact of an assumed noon — a sign picked
-     * essentially at random — so this reader gets two sections and is never told why. An
-     * apology for a missing section is worse than a profile that simply has two: they have
-     * nothing to compare it against, and the missing one cannot be written later anyway.
+     * The Rising card, or nothing at all. Without a birth time the Ascendant is an
+     * artefact of an assumed noon, so the card is simply absent and the reader is never
+     * told why — the app shows them where to add a birth time instead.
      */
-    const ascendantSection = input.risingSign
-        ? `2. yourAscendant — the placement they have never heard of, and the one that explains
-   why people's first impression of them is not quite right. Two paragraphs, and it is
-   tight: teach the word in the first, spend the second on the thing worth knowing.
-
-   FIRST PARAGRAPH — the word, taught while you describe them. They do not know what an
-   Ascendant is, so assume nothing: not that a chart holds more than one placement, not
-   that a placement is a thing. Teach it by contrast with what they just read — their Sun
-   is the person once they have settled in, their Ascendant is what a room gets in the
-   first ten minutes. Earn the word with the one mechanical fact that is about them: it
-   moves a whole sign every two hours, which is why it needed the time of day they were
-   born and their Sun sign did not. Theirs is ${input.risingSign}, and say what that face
-   looks like. Three sentences at the outside, and never one whose subject is astrology or
-   a chart. Never the words "houses", "cusp" or "chart ruler".
-
-   SECOND PARAGRAPH — the GAP, which is the only reason this section exists. Their
-   Ascendant promises one thing and their Sun is another, and most readers have felt that
-   mismatch without ever having a name for it: read as confident while deciding nothing,
-   underestimated, told they are "different once you get to know them". Name it. If the two
-   genuinely sit well together, say that instead — and say what it costs to be read
-   accurately by everyone, every time, with nowhere to hide.
-
-   No fact from their sign-up form belongs in either paragraph, on purpose: the last
-   section has them all, and this is the only section whose subject is a thing rather than
-   an area of their life. Take the concreteness from situations anyone would recognise —
-   walking into a room where they know nobody, the first ten minutes of an interview, a
-   first message. Never a claim about something that actually happened to them.
-
+    const risingBrief = facts.risingSign
+        ? `- rising — their Rising sign, ${facts.risingSign}: the first impression, what a room reads
+  in the first ten minutes, and how that differs from who they turn out to be.
 `
         : "";
 
@@ -179,26 +250,38 @@ ${input.language}
 This governs every field you return. It is repeated at the end; check it again before you
 answer.
 
-You are writing the personal profile a new user reads when they join an astrology app.
+You are writing about a new user of an astrology app, and you are writing two things at
+once:
 
-It is the first substantial thing they read about themselves, and it decides whether they
-believe this app knows them.
+- A private analysis the app keeps and never shows them. Everything it writes them later
+  — the daily horoscope, the Moon screen, compatibility, the chat — reads this to know who
+  it is talking to. It has to be deep, specific and honest.
+- The profile screen they read right after signing up: short cards about their placements
+  and one closing synthesis. It decides whether they believe this app knows them.
 
 ==================================================
 THEIR CHART
 ==================================================
 
-Sun: ${input.sunSign}
-Moon: ${chart.moon.sign}
-Rising: ${input.risingSign ?? "unknown — no birth time was given"}
+Sun: ${facts.sunSign}
+Moon: ${facts.moonSign}
+Rising: ${facts.risingSign ?? "unknown — no birth time was given"}
 Mercury: ${chart.mercury.sign}
 Venus: ${chart.venus.sign}
 Mars: ${chart.mars.sign}
+Jupiter: ${chart.jupiter.sign}
 Saturn: ${chart.saturn.sign}
 
 What the chart does to itself — the tensions and supports they carry permanently:
 
 ${describeNatalAspects(input.aspects)}
+
+Already worked out — these are facts, shown to the reader as labels. Never contradict them
+and never recount them:
+
+Dominant element: ${facts.element.key} (${describeDistribution(facts.element)})
+Dominant modality: ${facts.modality.key} (${describeDistribution(facts.modality)})
+Key planets: ${keyPlanets}
 
 ==================================================
 THEM
@@ -209,144 +292,124 @@ Career right now: ${careerStage}
 Relationship: ${relationshipStatus}
 Cares about: ${interests}
 
-==================================================
-HOW TO WRITE THIS
-==================================================
-
-Every section is the intersection of the chart and their life, and it needs both in
-roughly equal measure.
-
-The CHART supplies the substance: what this person is actually like, how they are built,
-what they do under pressure. That comes from the placements above and nowhere else — it
-is why two people in the same job with the same decision style get different profiles.
-
-Their LIFE supplies the setting: where that pattern is showing up for them right now.
-
-Lead with the pattern, land it in their life. A section that only names the pattern is a
-horoscope. A section that only describes their circumstances is a summary of a sign-up
-form, and they filled that in five minutes ago — they will notice.
-
-Two tests, and a section has to pass both:
-
-- Swap in the opposite decision style and career stage, same chart. If the section
-  reads the same, their life is missing.
-- Swap in a different chart, same life facts. If the section reads the same, the chart is
-  missing — and this is the easier mistake to make, because their answers are concrete and
-  the chart is not.
-
-NAME THE CHART, NEVER THE FORM
-
-The chart gets named out loud here, and that is the point of this text. "Your Sun is in
-Virgo, so you notice the one thing out of place before you notice the room" is right.
-"Your Virgo nature gives you an analytical disposition" is wrong — it named the sign twice
-and said nothing about the person. The placement is the doorway, never the subject.
-
-Their sign-up answers are the opposite: never named, always used. Not "as someone who
-researches everything", not "since you are ${relationshipStatus}". Those are boxes they
-ticked five minutes ago, and handing one back is the app reading its own database out
-loud — they notice, and it is the fastest way to lose them. Let the answer decide what
-you say, then say the thing itself.
-
-ONE ARGUMENT, NOT SEPARATE OPINIONS
-
-Write the sections in the order they are listed and do not go back. Before you begin one,
-read what you have already written and answer it. A section that opens a new subject
-instead of building on the one above it is the failure this rule exists for: the reader
-gets several opinions about themselves rather than one argument, and several opinions
-about the same person always come out sounding like the same opinion repeated.
-
-Never say here what you have already said above. You can see what you wrote — check.
+These are internal English labels for what they picked during sign-up. Never repeat one
+back, never translate one word for word. Let the answer decide what you say, then say the
+thing itself.
 
 ==================================================
-SECTIONS
+PART 1 — context (private, written first)
 ==================================================
 
-Each section opens with a placement and then spends itself on the person. The last section
-is the reading of all of them together, and it is the one that has to be unmistakably
-about this reader rather than about their sign.
+The analysis the rest of the app runs on. Write it first and write it properly: the cards
+and the signature below are distilled from it.
 
-1. yourSign — the answer to the question they arrived with. Two paragraphs, and they do
-   different jobs.
+Five categories, each 0 to ${CONTEXT_ITEMS_PER_CATEGORY} observations:
 
-   FIRST PARAGRAPH — the sign. Their Sun is in ${input.sunSign}. Say what that means in
-   plain speech, the way you would to someone who has read a horoscope column and nothing
-   else. This paragraph is the same for everyone born under it and it is meant to be: it
-   is the ground the next one stands on, and nobody has told them plainly before. Two
-   sentences, and then stop — this is not what they are here for.
+- corePatterns — how they actually operate: how they decide, what drives them, what they
+  do by default when nobody is watching.
+- innerTensions — where two parts of them want different things, and what that looks like
+  from the outside. The standing aspects above are the main material here.
+- emotionalPatterns — what makes them feel safe, what unsettles them, how they react
+  under pressure and how they recover.
+- relationshipPatterns — how they connect, communicate, show care and hold back with the
+  people close to them.
+- workPatterns — how they take on responsibility, what motivates them, where they stall.
 
-   SECOND PARAGRAPH — them, and not the sign. Mercury in ${chart.mercury.sign} is where
-   their version departs from the common one: the sign says what they want, Mercury says
-   how they actually go about getting it, and the two are often not a comfortable fit.
-   They decide by ${decisionStyle}, so say what that looks like in an ordinary week — as
-   something they do, not a trait they have. Two sentences here as well.
+Each observation:
 
-   The test: someone else with the same Sun sign must not be able to read the second
-   paragraph and find it equally true of themselves. If they could, you have written the
-   horoscope column twice.
+- text: one to three sentences of behaviour, specific enough that it would be wrong about
+  most other people. Use their life as the setting — the relationship they are in, the
+  stage their career is at, what they care about — without naming it. NO astrology
+  vocabulary at all: no sign, no planet, no Ascendant, no element, no aspect. The prompts
+  that read this are forbidden that vocabulary, and whatever sits in their context gets
+  echoed.
+- points: the chart points the observation stands on, as keys from the chart above
+  (sun, moon, ascendant, mercury, venus, mars, jupiter, saturn, uranus, neptune, pluto).
+  Name only the ones that genuinely produce it.
 
-${ascendantSection}${input.risingSign ? "3" : "2"}. inYourLife — the long read, and the only section written about them rather than
-   about a placement.
+Two tests, and every observation has to pass both:
 
-   Everything above was one placement at a time. This is what those placements do to each
-   other, and what that looks like inside the life they actually described on the way in.
+- Swap in a different chart, same sign-up answers. If the observation still holds, the
+  chart is missing — it is a description of their form, not of them.
+- Read it as someone with any other chart. If it is true of most people ("you have a
+  curious mind", "you value honesty"), it is a horoscope column. Cut it.
 
-   The standing aspects are the engine here — that is what this chart does to ITSELF, the
-   friction or the ease this person carries into every room regardless of what is happening
-   that week. That is the material neither section above had.
+Their sign-up answers are the setting, never the content. "You follow your gut when you
+decide" or "you research before committing" is their form read back to them, and the
+prompts that read this already have the form. Say what the chart does with it instead —
+what following their gut costs them, where the research stops being useful.
 
-   What they gave you: they are ${relationshipStatus}, their energy goes into ${interests},
-   their career is ${careerStage}. Use those as the rooms this personality is standing in,
-   not as subjects to mention. Naming the fact back to them is the fastest way to lose
-   them — they filled that form in five minutes ago.
+Leave a category empty rather than invent something the chart does not support. Never say
+the same thing twice across categories — a tension written once under innerTensions does
+not reappear under relationshipPatterns in other words.
 
-   Several angles, one per paragraph, each one somewhere the others are not: how they are
-   with people close to them, how they are when they work, what they are like under
-   pressure, what they want that they would not say out loud. Pick the ones this chart
-   actually has something to say about and drop the rest. A paragraph that restates the
-   one above it in richer words is the failure to watch for.
+This is analysis, not advice. Say what is true of them. Never what they should do.
 
-   This is analysis, not a plan. Say what is true of them. Never say what they should do
-   about it, never suggest, never encourage, and never end on a lesson.
+==================================================
+PART 2 — overview (the cards they see)
+==================================================
 
-Where a concrete example helps, take it from what they care about.
+Each card is one placement at a time, and each one names it. These are about the chart
+only: no fact from their sign-up answers belongs on a card — the signature has them.
+
+- sun — their Sun sign, ${facts.sunSign}: core identity, what they are like once people
+  know them.
+- moon — their Moon sign, ${facts.moonSign}: the emotional world, what happens inside that
+  others do not see.
+${risingBrief}- element — what having ${facts.element.key} as the dominant element means for how they
+  move through life. Not a definition of the element: what it does in them.
+- modality — what being mostly ${facts.modality.key} means for how they start, keep up and let
+  go of things.
+- planets — one card each for ${keyPlanets}. The app already shows which area of life each
+  planet stands for, so never open by explaining it ("Venus rules love…"). Say how this
+  placement plays out in this person, coloured by what the planet does with the rest of
+  the chart.
+
+Every card:
+
+- keyword (Sun, Moon and Rising only): one to three words that name the quality, never the
+  sign itself. It sits on a small card next to two others.
+- text: ONE sentence, at most twenty words. Concrete, about behaviour, true of this person.
+
+The cards are the way in, not the reading. A card that runs long is one that kept
+explaining the sign after it had finished.
+
+==================================================
+PART 3 — signature (written last)
+==================================================
+
+The most important text on the screen, and the only one that may not be read anywhere
+above it.
+
+- summary: two or three paragraphs, two to four sentences each — six to nine sentences in
+  all. One paragraph per array entry; never a line break inside one.
+
+  It connects their main placements and says how they work together in this person, and
+  each paragraph does a different job:
+
+  1. How the placements combine into one way of being — the thing that only exists
+     because these particular pieces sit together in one person.
+  2. Where that shows in their life. This is where their sign-up answers come in, unnamed:
+     let them decide which part of the chart you put weight on, and land it in the rooms
+     they actually live in.
+  3. (When the chart supports it) the tension underneath — what people misread about
+     them, or what the combination costs them — taken from what you found in part 1.
+
+  Open on them, not on a category of person: never "You are a woman who…", "You are a
+  man of…", "You are someone who…". It must say something none of the cards said. If a
+  sentence could stand on one card, it does not belong here. A paragraph that restates
+  the one above it in richer words is the failure to watch for.
 
 ==================================================
 OUTPUT
 ==================================================
 
-Return ONLY valid JSON, with the fields in this order:
+Return ONLY valid JSON in this order: context, then overview, then signature.
 
-{
-${
-    input.risingSign
-        ? `    "yourSign": ["string", "string"],
-    "yourAscendant": ["string", "string"],`
-        : `    "yourSign": ["string", "string"],`
-}
-    "inYourLife": ["string", "string", "..."]
-}
-
-- yourSign: exactly 2 entries, 2 sentences each.
-${input.risingSign ? "- yourAscendant: exactly 2 entries, 3 sentences at the outside in the first and 2 to 3 in the second.\n" : ""}- inYourLife: 3 to 5 entries, 3 to 5 sentences each.
-
-ONE PARAGRAPH PER ARRAY ENTRY, in every field. Never put a line break inside an entry, and
-never return a section as a single entry — the array IS the paragraph structure, and one
-long entry renders as a wall of text.
-
-The first two sections are short on purpose. They are the way in, not the reading: the
-last section is where the room is. A first section that runs long is one that kept
-explaining the sign after it had finished.
-
-Count sentences, not characters. Most sentences run well under twenty words and some are
-much shorter; the budget exists to leave room for the concrete detail, never to be filled
-with longer sentences or a bigger vocabulary. A section that reaches its count by restating
-itself is worse than one that stops a sentence early.
-
-Describe patterns and behaviour, never labels or traits.
+No markdown and no headings. Count sentences, not characters. Describe patterns and
+behaviour, never labels or traits.
 
 Nothing about "the universe", "cosmic energy", "the cosmos", or "you are destined".
-
-No markdown and no headings.
 
 ==================================================
 HOW TO WRITE IT
@@ -360,70 +423,37 @@ Take the register from the rules above — plain words, real situations, one ide
 sentence — and throw their tense away. They are written for a horoscope, so every example
 in them says "today". There is no today here.
 
-Everything in this profile is true of this person in general: last year, this month, next
-spring. Present tense, and permanent.
+Everything here is true of this person in general: last year, this month, next spring.
+Present tense, and permanent.
 
   Wrong: "today you will want to think it over before you answer"
   Right: "you think things over before you answer, and being rushed is what you resent"
 
-Two things are banned outright, in any language, because they are what turns this back
-into a horoscope:
+Two things are banned outright, in any language:
 
 - any word that fixes it to a moment — "today", "this week", "right now", "at the moment",
   "currently", "lately"
-- any instruction to go and do something — "try", "start", "ask them", "pick one", "say
-  it out loud". You are describing a person, not giving them a task. Nothing here is
-  advice, and no sentence ends in a suggestion.
+- any instruction to go and do something — "try", "start", "ask them", "pick one". You are
+  describing a person, not giving them a task.
 
-The test: if a sentence would still make sense sent as a message tomorrow morning, it is a
-horoscope and does not belong in this profile.
+NAME THE ASTROLOGY ON THE CARDS — THIS IS THE EXCEPTION
 
-NAME THE ASTROLOGY HERE — THIS IS THE EXCEPTION
-
-The writing rules above forbid naming a planet, a sign, an aspect or the Ascendant, on the
-grounds that the reader is not an astrologer. That is right everywhere else in this app and
-wrong here. This is the first thing they read after signing up to an astrology app, they
-came with the question "what does my sign say about me", and nothing else will answer it.
-
-So: name the signs. Name the planets. Name the Ascendant and explain what it is.
+The writing rules above forbid naming a planet, a sign, an aspect or the Ascendant. On the
+cards (part 2) that ban is lifted: this is the first thing they read after signing up to
+an astrology app, and they came to find out what their placements say about them. Name the
+signs and planets there. In part 1 the ban stands in full. In the signature, name a
+placement only where the sentence needs it.
 
 NAME THE PLANETS, NEVER THE ANGLE BETWEEN THEM
 
 Two planets are "pulling against each other", "working together", "putting pressure on"
-one another. That is the whole vocabulary you need and it is the honest one.
+one another. Never name the aspect itself — not conjunction, not square, not trine,
+opposition or sextile, in any language. It is a word the reader would have to look up, and
+one you can get wrong about their chart. Never reach for a vague substitute either —
+"because of the influences in your chart".
 
-Never name the aspect itself — not conjunction, not square, not trine, opposition or
-sextile, in any language. Two reasons, and the second is the serious one. It is a word the
-reader would have to look up. And it is a word you will get wrong: the list above says
-which aspect each pair makes, and writing "conjunction" over a square is a factual error
-about this person's chart that any reader who knows charts will catch. Say what the two
-planets do to each other and you cannot be wrong about it.
-
-Never reach for a vague substitute either — "because of the influences in your chart",
-"given the placements involved". Name the two planets or say nothing.
-
-What does NOT come back with the vocabulary:
-
-- Geometry first. Never open on the mechanism and arrive at the person late.
-
-    Bad:  "Venus is in opposition to your natal Saturn and square your Ascendant, which
-           creates tension in close relationships."
-    Good: "Venus and Saturn pull against each other in your chart. Warmth costs you more
-           effort than it costs other people, and you would rather be useful than fond."
-
-  The bad one is twice as long, spends its first sentence on geometry and ends in abstract
-  nouns. All three are the failure.
-
-- Jargon with no payoff: degrees, orbs, houses, "cusp", "natal", "retrograde", "chart
-  ruler", element and modality names. A word the reader would have to look up is a word
-  that has told them nothing.
-
-- One clause of mechanism, then the person. Never two sentences of it in a row.
-
-Everything else above still holds without exception: plain words, one idea per sentence,
-concrete rather than abstract, the ordinary name for each body in their language, no
-therapy register, no essayist's closing move. Observant and psychologically believable —
-someone who has been paying attention, not someone reading a chart aloud.
+No jargon with no payoff: degrees, orbs, houses, "cusp", "natal", "chart ruler". One clause
+of mechanism at most, then the person.
 
 They describe their belief in astrology as "${humanizeEnum(input.beliefLevel)}" and prefer
 content that is "${humanizeEnum(input.contentPreference)}". Match that register. Never
@@ -443,8 +473,7 @@ export interface PersonalityInput {
     chart: NatalChart;
     /** Without a birth time the Moon could sit anywhere in a day's arc, so its orb widens. */
     hasBirthTime: boolean;
-    sunSign: string;
-    risingSign: string | null;
+    sunSign: ZodiacSign;
     relationshipStatus: string;
     careerStage: string;
     decisionStyle: string;
@@ -455,28 +484,39 @@ export interface PersonalityInput {
     gender: Gender;
 }
 
+export interface PersonalityResult {
+    /** Always complete as facts; the texts are empty when the model failed. */
+    overview: PersonalityOverview;
+    /** Null when the model answered twice with something unusable. */
+    context: PersonalityContext | null;
+    /** The prompt, stored alongside for auditing what the profile was written from. */
+    input: string;
+}
+
 /**
  * Writes the profile, with one retry.
  *
- * Returns the JSON string the `profile.personality_profile` column holds, or null when
- * the model answered twice with something unusable — what that means is the caller's
- * call: onboarding stores an empty profile rather than lose the sign-up, an update
- * refuses to replace a working profile with nothing.
+ * A null `context` means the model failed twice, and what that means is the caller's
+ * call: onboarding stores the facts-only overview rather than lose the sign-up, an update
+ * refuses to replace a working profile with it.
  */
 export async function generatePersonalityProfile(
     fastify: FastifyInstance,
     input: PersonalityInput
-): Promise<{ personalityProfile: string | null; personalityProfileInput: string; empty: string }> {
+): Promise<PersonalityResult> {
     const language = getLanguageByIso(input.languageIso);
+
+    const aspects = findNatalAspects(input.chart, {
+        personalOnly: true,
+        widenNatalMoon: !input.hasBirthTime,
+    });
+
+    const facts = computeProfileFacts({ chart: input.chart, aspects, sunSign: input.sunSign });
 
     const prompt = buildPrompt({
         chart: input.chart,
-        aspects: findNatalAspects(input.chart, {
-            personalOnly: true,
-            widenNatalMoon: !input.hasBirthTime,
-        }),
-        sunSign: input.sunSign,
-        risingSign: input.risingSign,
+        aspects,
+        facts,
         relationshipStatus: input.relationshipStatus,
         careerStage: input.careerStage,
         decisionStyle: input.decisionStyle,
@@ -486,18 +526,13 @@ export async function generatePersonalityProfile(
         language: language ? buildPromptLanguageRule(language, input.gender) : input.languageIso,
     });
 
-    /**
-     * Two shapes, chosen once. A reader with no birth time has no Ascendant and
-     * therefore no second section, and the response schema, the property order and
-     * the parse all have to agree about that.
-     */
-    const shape = profileShape(input.risingSign);
+    const schema = buildAnswerSchema(facts);
 
-    let personalityProfile: PersonalityProfile | PersonalityProfileWithoutAscendant | null = null;
+    let answer: Answer | null = null;
 
     // One retry, because most failures here are a timeout or a rate limit
     // rather than anything a second attempt would hit again.
-    for (let attempt = 1; attempt <= 2 && !personalityProfile; attempt++) {
+    for (let attempt = 1; attempt <= 2 && !answer; attempt++) {
         const startedAt = Date.now();
 
         const response = await ai.models.generateContent({
@@ -509,33 +544,23 @@ export async function generatePersonalityProfile(
                  *
                  * Measured on the daily prompt, the default budget spends 2 000–9 500 hidden
                  * tokens for nothing but reaching back for the address rule, so that route runs
-                 * at zero. This one is different in kind: the three sections are written as
-                 * answers to each other, and cross-section planning is the whole design. Left at
-                 * zero the model can only avoid repeating itself by reading back what it has
-                 * already emitted.
+                 * at zero. This one is different in kind: the cards and the signature are
+                 * distilled from the analysis written before them, and cross-section planning
+                 * is the whole design.
                  *
-                 * Small rather than dynamic because the work is planning three sections, not
-                 * solving anything — and because this runs while a new reader waits on the
-                 * signup screen, where latency is the one cost that is not a rounding error. At
-                 * one call per signup the token cost is; the wait is not.
+                 * Small rather than dynamic because this runs while a new reader waits on the
+                 * signup screen, where latency is the one cost that is not a rounding error.
                  */
                 thinkingConfig: { thinkingBudget: 1024 },
                 responseMimeType: "application/json",
-                responseJsonSchema: {
-                    ...toResponseJsonSchema(shape.schema),
-                    /**
-                     * Google documents property emission order as arbitrary unless this is set,
-                     * and the last section is written as a reading of the ones above it.
-                     */
-                    propertyOrdering: shape.ordering,
-                },
+                responseJsonSchema: toOrderedResponseJsonSchema(schema),
             },
         });
 
         const raw = parseLLMJson<unknown>(response.text ?? "");
-        const parsed = raw === null ? null : shape.schema.safeParse(raw);
+        const parsed = raw === null ? null : schema.safeParse(raw);
 
-        personalityProfile = parsed?.success ? parsed.data : null;
+        answer = parsed?.success ? (parsed.data as Answer) : null;
 
         const inputTokens = response.usageMetadata?.promptTokenCount ?? 0;
         /**
@@ -553,8 +578,8 @@ export async function generatePersonalityProfile(
             .values({
                 userId: input.userId,
                 type: "personalityProfile",
-                status: personalityProfile ? "success" : "error",
-                error: personalityProfile
+                status: answer ? "success" : "error",
+                error: answer
                     ? null
                     : `Unusable answer (finishReason: ${response.candidates?.[0]?.finishReason ?? "unknown"})`,
                 requestId: response.responseId ?? "",
@@ -574,8 +599,20 @@ export async function generatePersonalityProfile(
     }
 
     return {
-        personalityProfile: personalityProfile ? JSON.stringify(personalityProfile) : null,
-        personalityProfileInput: prompt,
-        empty: JSON.stringify(shape.empty),
+        overview: buildOverview(facts, answer),
+        context: answer ? trimContext(answer.context) : null,
+        input: prompt,
     };
+}
+
+/** Whitespace off every observation, and an observation that is nothing but whitespace dropped. */
+function trimContext(context: PersonalityContext): PersonalityContext {
+    return Object.fromEntries(
+        CONTEXT_CATEGORIES.map((category) => [
+            category,
+            context[category]
+                .map((item) => ({ ...item, text: item.text.trim() }))
+                .filter((item) => item.text.length > 0),
+        ])
+    ) as PersonalityContext;
 }

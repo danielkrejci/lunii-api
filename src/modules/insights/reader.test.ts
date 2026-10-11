@@ -18,6 +18,14 @@ const chart = {
     pluto: { sign: "scorpio", longitude: 225 },
 } as unknown as NatalChart;
 
+const context = {
+    corePatterns: [{ text: "Decides slowly.", points: ["sun", "saturn"] }],
+    innerTensions: [{ text: "Wants certainty before moving.", points: ["mars", "saturn"] }],
+    emotionalPatterns: [{ text: "Goes quiet when upset.", points: ["moon"] }],
+    relationshipPatterns: [{ text: "Shows care by fixing things.", points: ["venus"] }],
+    workPatterns: [{ text: "Stalls when the brief is vague.", points: ["mercury"] }],
+};
+
 const reader: Reader = {
     gender: "female",
     decisionStyle: "do_my_research",
@@ -26,11 +34,7 @@ const reader: Reader = {
     areasOfInterest: ["career", "self_development"],
     beliefLevel: "curious_sceptic",
     contentPreference: "practical",
-    personalityProfile: JSON.stringify({
-        yourSign: ["Your Sun is in Gemini.", "So you think out loud."],
-        yourAscendant: ["Your Ascendant is Leo.", "People meet the confident one first."],
-        inYourLife: ["Decides slowly.", "Wants certainty before moving."],
-    }),
+    personalityContext: context,
     birthChart: chart,
 };
 
@@ -39,7 +43,7 @@ const contact = (natal: string): PlanetContact =>
 
 describe("buildReaderBlock", () => {
     it("humanizes the enum keys the client sends", () => {
-        const block = buildReaderBlock(reader);
+        const block = buildReaderBlock(reader, "daily");
 
         assert.match(block, /Decides by: do my research/u);
         assert.match(block, /Relationship: in a relationship/u);
@@ -49,113 +53,94 @@ describe("buildReaderBlock", () => {
     });
 
     it("omits a fact rather than writing none or unknown", () => {
-        const block = buildReaderBlock({
-            ...reader,
-            careerStage: "",
-            areasOfInterest: [],
-        });
+        const block = buildReaderBlock({ ...reader, careerStage: "", areasOfInterest: [] }, "daily");
 
         assert.doesNotMatch(block, /none|unknown/iu);
         assert.doesNotMatch(block, /Career right now/u);
         assert.doesNotMatch(block, /Cares about/u);
-        // What is left is still there.
         assert.match(block, /Decides by: do my research/u);
     });
 
-    it("carries the onboarding profile and forbids quoting it back", () => {
-        const block = buildReaderBlock(reader);
+    it("carries the context and forbids quoting it back", () => {
+        const block = buildReaderBlock(reader, "daily");
 
-        assert.match(block, /Decides slowly\./u);
-        assert.match(block, /Wants certainty before moving\./u);
-        assert.match(block, /Never quote or restate the profile/u);
+        assert.match(block, /- Decides slowly\./u);
+        assert.match(block, /- Wants certainty before moving\./u);
+        assert.match(block, /Never quote or restate how they work/u);
     });
 
     /**
-     * The two opening sections are sign-level and half of one explains what an Ascendant
-     * is — general where this block needs particular, and full of vocabulary every prompt
-     * reading it forbids in its own output.
+     * Each prompt takes the part of the context that bears on its question, not all of it.
      */
-    it("leaves out the sections written about a placement", () => {
-        const block = buildReaderBlock(reader);
+    it("carries only the categories its focus asks for", () => {
+        const daily = buildReaderBlock(reader, "daily");
+        assert.doesNotMatch(daily, /Shows care by fixing things/u);
+        assert.doesNotMatch(daily, /Goes quiet when upset/u);
 
-        assert.doesNotMatch(block, /Gemini/u);
-        assert.doesNotMatch(block, /Ascendant is Leo/u);
-        // And it warns the model off the vocabulary the profile is allowed to use.
-        assert.match(block, /That vocabulary belongs to it, not to you/u);
+        const compatibility = buildReaderBlock(reader, "compatibility");
+        assert.match(compatibility, /Shows care by fixing things/u);
+        assert.match(compatibility, /Wants certainty before moving/u);
+        assert.doesNotMatch(compatibility, /Stalls when the brief is vague/u);
+
+        const moon = buildReaderBlock(reader, "moon");
+        assert.match(moon, /Goes quiet when upset/u);
+        assert.doesNotMatch(moon, /Decides slowly/u);
     });
 
-    // Paragraphs stay paragraphs: joined with a space, four of them are a wall of text.
-    it("keeps one paragraph per entry", () => {
-        const block = buildReaderBlock(reader);
+    it("pulls in an observation about a point today is touching, from any category", () => {
+        const block = buildReaderBlock(reader, "daily", [contact("venus")]);
 
-        assert.match(block, /Decides slowly\.\n\nWants certainty before moving\./u);
+        assert.match(block, /Shows care by fixing things/u);
+        // Most relevant first.
+        assert.ok(block.indexOf("Shows care") < block.indexOf("Decides slowly"));
+    });
+
+    it("never repeats an observation that qualifies twice", () => {
+        const block = buildReaderBlock(reader, "daily", [contact("saturn")]);
+
+        assert.equal(block.match(/Decides slowly/gu)?.length, 1);
+    });
+
+    it("caps how many observations a block carries", () => {
+        const many = Array.from({ length: 3 }, (_, index) => ({ text: `Pattern ${index}.`, points: ["sun"] }));
+        const full = Object.fromEntries(
+            ["corePatterns", "innerTensions", "emotionalPatterns", "relationshipPatterns", "workPatterns"].map(
+                (category) => [category, many.map((item) => ({ ...item, text: `${category} ${item.text}` }))]
+            )
+        );
+
+        const block = buildReaderBlock({ ...reader, personalityContext: full }, "chat");
+
+        assert.equal(block.match(/^- /gmu)?.length, 8);
     });
 
     /**
-     * A reader with no birth time has no Ascendant and so gets a two-section profile. The
-     * block must not care.
+     * The column is JSONB written by a generation that may have failed, and at onboarding
+     * it came through the client. None of these may throw or produce a block.
      */
-    it("reads a profile written without an Ascendant section", () => {
-        const block = buildReaderBlock({
-            ...reader,
-            personalityProfile: JSON.stringify({
-                yourSign: ["Your Sun is in Gemini."],
-                inYourLife: ["Decides slowly."],
-            }),
-        });
-
-        assert.match(block, /How they work/u);
-        assert.match(block, /Decides slowly\./u);
-    });
-
-    it("drops the profile block when onboarding stored nothing usable", () => {
-        const empty = JSON.stringify({ yourSign: [], yourAscendant: [], inYourLife: [] });
-
-        for (const stored of [empty, "", "not json at all"]) {
-            const block = buildReaderBlock({ ...reader, personalityProfile: stored });
-
-            assert.doesNotMatch(block, /How they work/u, `expected no profile block for ${stored.slice(0, 20)}`);
-            assert.match(block, /Decides by/u);
-        }
-    });
-
-    /**
-     * The column round-trips through the client as an unvalidated string, so anything at
-     * all can be in it. None of these may throw.
-     */
-    it("ignores a shape it does not recognise", () => {
+    it("drops the context block when there is nothing usable", () => {
         const stored = [
-            JSON.stringify({ foo: "bar" }),
-            "[]",
-            "null",
-            "42",
-            // The section as a bare string rather than the array of paragraphs it must be.
-            JSON.stringify({ yourSign: ["x"], inYourLife: "Decides slowly." }),
-            JSON.stringify({ yourSign: ["x"], inYourLife: ["", "   "] }),
+            null,
+            undefined,
+            "",
+            "not json at all",
+            { foo: "bar" },
+            [],
+            42,
+            { ...context, corePatterns: "Decides slowly." },
+            Object.fromEntries(Object.keys(context).map((key) => [key, []])),
         ];
 
-        for (const profile of stored) {
-            const block = buildReaderBlock({ ...reader, personalityProfile: profile });
+        for (const personalityContext of stored) {
+            const block = buildReaderBlock({ ...reader, personalityContext }, "daily");
 
-            assert.doesNotMatch(block, /How they work/u, `expected no profile block for ${profile.slice(0, 24)}`);
+            assert.doesNotMatch(block, /How they work/u, `expected no block for ${JSON.stringify(personalityContext)}`);
             assert.match(block, /Decides by/u);
         }
-    });
-
-    it("keeps the paragraphs either side of an entry that is not a string", () => {
-        const block = buildReaderBlock({
-            ...reader,
-            personalityProfile: JSON.stringify({
-                yourSign: ["x"],
-                inYourLife: ["Decides slowly.", 5, "Wants certainty before moving."],
-            }),
-        });
-
-        assert.match(block, /Decides slowly\.\n\nWants certainty before moving\./u);
     });
 
     it("names only the placements today is actually touching", () => {
-        const block = buildReaderBlock(reader, [contact("moon"), contact("venus"), contact("moon")]);
+        const block = buildReaderBlock(reader, "daily", [contact("moon"), contact("venus"), contact("moon")]);
 
         assert.match(block, /their moon in aquarius/u);
         assert.match(block, /their venus in taurus/u);
@@ -167,13 +152,16 @@ describe("buildReaderBlock", () => {
 
     it("skips a placement the chart cannot supply", () => {
         // No birth time, so no Ascendant — naming a sign for it would be a fabrication.
-        const block = buildReaderBlock(reader, [contact("ascendant")]);
+        const block = buildReaderBlock(reader, "daily", [contact("ascendant")]);
 
         assert.doesNotMatch(block, /their ascendant/u);
     });
 
     it("keeps the two-fact budget and the use-never-name rule in every version", () => {
-        for (const block of [buildReaderBlock(reader), buildReaderBlock({ ...reader, personalityProfile: "" })]) {
+        for (const block of [
+            buildReaderBlock(reader, "daily"),
+            buildReaderBlock({ ...reader, personalityContext: null }, "chat"),
+        ]) {
             assert.match(block, /AT MOST TWO/u);
             assert.match(block, /Use, never name/u);
         }

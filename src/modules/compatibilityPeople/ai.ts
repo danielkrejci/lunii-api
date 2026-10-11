@@ -545,7 +545,7 @@ export function buildCompatibilityInsightRequest(
     // Person A is the reader — the gendered forms and the profile are theirs.
     const prompt = buildPrompt(
         language ? buildPromptLanguageRule(language, input.reader.gender) : languageIso,
-        buildReaderBlock(input.reader),
+        buildReaderBlock(input.reader, "compatibility"),
         input
     );
 

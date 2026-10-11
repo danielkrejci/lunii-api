@@ -431,6 +431,7 @@ export function buildPlanetInsightsRequest(input: {
         // come from the contacts on show rather than from the day's strongest impacts.
         readerBlock: buildReaderBlock(
             input.reader,
+            "planet",
             input.planets.flatMap((planet) => planet.contacts)
         ),
         teaser: input.teaser,

@@ -454,7 +454,7 @@ export function buildMoonInsightRequest(input: {
         teaser: input.teaser,
         language: language ? buildPromptLanguageRule(language, input.reader.gender) : input.languageIso,
         natalMoonSign: input.natalMoonSign,
-        readerBlock: buildReaderBlock(input.reader, input.contacts),
+        readerBlock: buildReaderBlock(input.reader, "moon", input.contacts),
     });
 
     return {

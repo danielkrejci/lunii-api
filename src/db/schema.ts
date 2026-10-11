@@ -25,6 +25,7 @@ import { DailyInsightContent, GenerationStatus } from "../modules/insights";
 import { PlanetInsightContent } from "../modules/insights/planets";
 import { MoonInsightContent } from "../modules/moon/ai";
 import { MoonVariant } from "../modules/moon/today";
+import { PersonalityContext } from "../modules/personality/schema";
 import { Gender, Relationship, TransitAspects, TransitPlanets, ZodiacSign } from "../utils/natalUtils";
 
 export const aiGenerations = pgTable(
@@ -736,6 +737,11 @@ export const profile = pgTable(
             .references(() => user.id, { onDelete: "cascade" })
             .unique(),
         name: text("name").notNull(),
+        /**
+         * Public R2 URL of the reader's photo. Seeded once from the Google photo at
+         * sign-up, then the reader's own; null shows the initial instead.
+         */
+        image: text("image"),
         referrer: text("referrer"),
         birthDate: date("birth_date", { mode: "string" }).notNull(),
         birthTime: time("birth_time"),
@@ -753,7 +759,13 @@ export const profile = pgTable(
         areasOfInterest: text("areas_of_interest").array().notNull(),
         contentPreference: text("content_preference").notNull(),
         beliefLevel: text("belief_level").notNull(),
+        /** The Cosmic Overview screen, as the JSON string of a `PersonalityOverview`. */
         personalityProfile: text("personality_profile").notNull(),
+        /**
+         * The analysis every prompt reads to know who it is writing for. Never shown to the
+         * reader. Null when the generation failed — the prompts then do without it.
+         */
+        personalityContext: jsonb("personality_context").$type<PersonalityContext>(),
         personalityProfileInput: text("personality_profile_input").notNull(),
         timezone: text("timezone").notNull(),
         /**

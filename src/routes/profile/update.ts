@@ -321,7 +321,6 @@ export default (async (fastify) => {
                         chart: next.birthChart,
                         hasBirthTime: next.birthTime !== null,
                         sunSign: next.sunSign,
-                        risingSign: next.risingSign,
                         relationshipStatus: next.relationshipStatus,
                         careerStage: next.careerStage,
                         decisionStyle: next.decisionStyle,
@@ -332,7 +331,7 @@ export default (async (fastify) => {
                         gender: next.gender,
                     });
 
-                    if (!personality.personalityProfile) {
+                    if (!personality.context) {
                         await refund();
 
                         return reply.status(502).send({
@@ -343,8 +342,9 @@ export default (async (fastify) => {
                         });
                     }
 
-                    derived.personalityProfile = personality.personalityProfile;
-                    derived.personalityProfileInput = personality.personalityProfileInput;
+                    derived.personalityProfile = JSON.stringify(personality.overview);
+                    derived.personalityContext = personality.context;
+                    derived.personalityProfileInput = personality.input;
                 }
 
                 // Read just before the write, so it is what this edit is about to replace.

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { NatalAspect, NatalChart } from "../astro";
-import { buildPrompt } from "./generate";
+import { buildAnswerSchema, buildOverview, buildPrompt, computeProfileFacts, ProfileFacts } from "./generate";
+import { personalityOverviewSchema } from "./schema";
 
 const chart = {
     sun: { sign: "gemini", longitude: 80 },
@@ -15,17 +16,26 @@ const chart = {
     uranus: { sign: "capricorn", longitude: 275 },
     neptune: { sign: "capricorn", longitude: 285 },
     pluto: { sign: "scorpio", longitude: 225 },
+    ascendant: { sign: "leo", longitude: 130 },
 } as unknown as NatalChart;
 
+const chartWithoutTime = { ...chart, ascendant: undefined };
+
 const aspects = [
-    { a: "sun", b: "saturn", aspect: "square", group: "hard", orb: 1.2, strength: 0.8 },
+    { a: "sun", b: "saturn", aspect: "square", group: "challenging", orb: 1.2, strength: 0.8 },
 ] as unknown as NatalAspect[];
+
+const facts = computeProfileFacts({ chart, aspects, sunSign: "gemini" });
+const factsWithoutTime = computeProfileFacts({
+    chart: chartWithoutTime as NatalChart,
+    aspects,
+    sunSign: "gemini",
+});
 
 const input = {
     chart,
     aspects,
-    sunSign: "gemini",
-    risingSign: "leo" as string | null,
+    facts,
     relationshipStatus: "in_a_relationship",
     careerStage: "changing_field",
     decisionStyle: "do_my_research",
@@ -34,6 +44,21 @@ const input = {
     beliefLevel: "curious_sceptic",
     language: "Respond in Czech.",
 };
+
+const part = (prompt: string, from: string, to: string) => prompt.split(from)[1].split(to)[0];
+
+describe("computeProfileFacts", () => {
+    it("takes the signs from the chart and the Sun from what the reader confirmed", () => {
+        assert.equal(facts.sunSign, "gemini");
+        assert.equal(facts.moonSign, "aquarius");
+        assert.equal(facts.risingSign, "leo");
+        assert.equal(facts.keyPlanets.length, 3);
+    });
+
+    it("has no Rising sign without a birth time", () => {
+        assert.equal(factsWithoutTime.risingSign, null);
+    });
+});
 
 describe("buildPrompt", () => {
     /**
@@ -56,151 +81,192 @@ describe("buildPrompt", () => {
         assert.match(prompt, /in a relationship/u);
         assert.match(prompt, /career, self development/u);
 
-        // The underscored form must never survive into a prompt.
         for (const raw of ["do_my_research", "changing_field", "in_a_relationship", "self_development"]) {
             assert.doesNotMatch(prompt, new RegExp(raw, "u"));
         }
     });
 
-    it("asks for exactly the three sections when there is a birth time", () => {
-        const output = buildPrompt(input).split("OUTPUT")[1].split("HOW TO WRITE IT")[0];
+    it("hands the computed facts over as given", () => {
+        const prompt = buildPrompt(input);
 
-        for (const key of ["yourSign", "yourAscendant", "inYourLife"]) {
-            assert.match(output, new RegExp(`"${key}"`, "u"));
-        }
+        assert.match(prompt, new RegExp(`Dominant element: ${facts.element.key}`, "u"));
+        assert.match(prompt, new RegExp(`Dominant modality: ${facts.modality.key}`, "u"));
+        assert.match(prompt, /Never contradict them\nand never recount them/u);
 
-        for (const gone of ["core", "emotions", "expression", "howYouWork", "whatYoureReallyAfter"]) {
-            assert.doesNotMatch(output, new RegExp(`"${gone}"`, "u"), `old section ${gone} still requested`);
+        for (const { planet, sign } of facts.keyPlanets) {
+            assert.match(prompt, new RegExp(`${planet} in ${sign}`, "u"));
         }
     });
 
-    /**
-     * No birth time means no Ascendant, so the section must be impossible rather than
-     * merely discouraged — and the reader is never told a section is missing.
-     */
-    it("drops the Ascendant section entirely when there is no birth time", () => {
-        const prompt = buildPrompt({ ...input, risingSign: null });
+    it("asks for the context first and the signature last", () => {
+        const prompt = buildPrompt(input);
 
-        assert.doesNotMatch(prompt.split("SECTIONS")[1], /yourAscendant/u);
-        assert.doesNotMatch(prompt, /"yourAscendant"/u);
+        const context = prompt.indexOf("PART 1 — context");
+        const overview = prompt.indexOf("PART 2 — overview");
+        const signature = prompt.indexOf("PART 3 — signature");
+
+        assert.ok(context > 0 && context < overview && overview < signature);
+    });
+
+    /**
+     * No birth time means no Ascendant, so the card must be impossible rather than merely
+     * discouraged — and the reader is never told it is missing.
+     */
+    it("drops the Rising card entirely when there is no birth time", () => {
+        const prompt = buildPrompt({ ...input, chart: chartWithoutTime as NatalChart, facts: factsWithoutTime });
+
+        assert.doesNotMatch(part(prompt, "PART 2", "PART 3"), /- rising/u);
         assert.match(prompt, /unknown — no birth time was given/u);
-
-        // The remaining sections are renumbered, not left with a hole.
-        assert.match(prompt, /2\. inYourLife/u);
-        assert.doesNotMatch(prompt, /3\. inYourLife/u);
     });
 
-    it("explains what an Ascendant is when there is a birth time", () => {
+    it("briefs the Rising card when there is a birth time", () => {
+        assert.match(part(buildPrompt(input), "PART 2", "PART 3"), /- rising — their Rising sign, leo/u);
+    });
+
+    /**
+     * The context is read by prompts that may not name the astrology, and whatever sits in
+     * a prompt's context gets echoed.
+     */
+    it("keeps the astrology vocabulary out of the context", () => {
+        const brief = part(buildPrompt(input), "PART 1", "PART 2");
+
+        assert.match(brief, /NO astrology\n {2}vocabulary at all/u);
+        assert.match(brief, /Leave a category empty rather than invent something/u);
+    });
+
+    /**
+     * The cards are about the chart; the sign-up answers belong to the signature and the
+     * context, where they make the text about this person rather than about the sign.
+     */
+    it("gives the sign-up answers to the signature, never to a card", () => {
+        const prompt = buildPrompt(input);
+        const cards = part(prompt, "PART 2", "PART 3");
+
+        assert.match(cards, /no fact from their sign-up answers belongs on a card/u);
+        assert.match(part(prompt, "PART 3", "OUTPUT"), /This is where their sign-up answers come in, unnamed/u);
+
+        for (const fact of ["do my research", "changing field", "in a relationship"]) {
+            assert.doesNotMatch(cards, new RegExp(fact, "u"));
+        }
+    });
+
+    it("forbids the signature from repeating the cards", () => {
+        const signature = part(buildPrompt(input), "PART 3", "OUTPUT");
+
+        assert.match(signature, /It must say something none of the cards said/u);
+        assert.match(signature, /never "You are a woman who…"/u);
+    });
+
+    /**
+     * The signature is the long read now: one text in paragraphs, no title, and each
+     * paragraph briefed with its own job so the second does not restate the first.
+     */
+    it("asks for the signature as two or three paragraphs and no title", () => {
+        const signature = part(buildPrompt(input), "PART 3", "OUTPUT");
+
+        assert.match(signature, /two or three paragraphs, two to four sentences each/u);
+        assert.match(signature, /One paragraph per array entry/u);
+        assert.doesNotMatch(signature, /- title:/u);
+    });
+
+    it("lifts the ban on naming the astrology on the cards only", () => {
         const prompt = buildPrompt(input);
 
-        assert.match(prompt, /2\. yourAscendant/u);
-        assert.match(prompt, /3\. inYourLife/u);
-        assert.match(prompt, /They do not know what an\n   Ascendant is, so assume nothing/u);
-        assert.match(prompt, /it\n   moves a whole sign every two hours/u);
-        // Their actual Rising sign has to reach the brief, not just the chart block.
-        assert.match(prompt.split("SECTIONS")[1], /Theirs is leo/u);
+        assert.match(prompt, /NAME THE ASTROLOGY ON THE CARDS — THIS IS THE EXCEPTION/u);
+        assert.match(prompt, /In part 1 the ban stands in full/u);
     });
 
     /**
-     * Every section is paragraphs, and the two opening ones are deliberately the short way
-     * in rather than the reading itself.
-     */
-    it("asks for every section as paragraphs, the first two short", () => {
-        const output = buildPrompt(input).split("OUTPUT")[1].split("HOW TO WRITE IT")[0];
-
-        assert.match(output, /"yourSign": \["string", "string"\]/u);
-        assert.match(output, /"yourAscendant": \["string", "string"\]/u);
-        assert.match(output, /ONE PARAGRAPH PER ARRAY ENTRY, in every field/u);
-
-        assert.match(output, /yourSign: exactly 2 entries, 2 sentences each/u);
-        assert.match(output, /The first two sections are short on purpose/u);
-
-        // No section may be asked for as a bare string any more.
-        assert.doesNotMatch(output, /": "string"/u);
-    });
-
-    /**
-     * This route is the one place in the app allowed to name the astrology, and the ban it
-     * overrides lives in the shared voice rules, so the override has to be explicit —
-     * `REASON_RULES` documents what happens when a prompt bans and asks at the same time.
-     */
-    it("lifts the ban on naming the astrology", () => {
-        const prompt = buildPrompt(input);
-
-        assert.match(prompt, /NAME THE ASTROLOGY HERE — THIS IS THE EXCEPTION/u);
-        assert.doesNotMatch(prompt, /No astrology vocabulary, no zodiac names/u);
-        // But the jargon with no payoff stays out.
-        assert.match(prompt, /degrees, orbs, houses/u);
-    });
-
-    /**
-     * Naming the astrology makes the text accountable for it. A real generation called a
-     * square a conjunction — free to do once nothing checked it, and a factual claim about
-     * this person's chart that any reader who knows charts will catch.
+     * A real generation called a square a conjunction — a factual claim about this
+     * person's chart that any reader who knows charts will catch.
      */
     it("forbids naming the aspect it could get wrong", () => {
         const prompt = buildPrompt(input);
 
         assert.match(prompt, /NAME THE PLANETS, NEVER THE ANGLE BETWEEN THEM/u);
-        assert.match(prompt, /not conjunction, not square, not trine, opposition or\nsextile/u);
-        // And the vague dodge that replaces a banned word is banned too.
         assert.match(prompt, /because of the influences in your chart/u);
     });
 
-    it("counts sentences rather than characters", () => {
-        const prompt = buildPrompt(input);
-
-        assert.match(prompt, /Count sentences, not characters\./u);
-        assert.doesNotMatch(prompt, /at most \d+ characters/u);
-    });
-
     it("says there is no standing aspect rather than leaving the list empty", () => {
-        const prompt = buildPrompt({ ...input, aspects: [] });
-
-        assert.match(prompt, /no close aspect to itself/u);
+        assert.match(buildPrompt({ ...input, aspects: [] }), /no close aspect to itself/u);
     });
 
-    /**
-     * The regression this guards is one the prompt caused itself: the third section used
-     * to be briefed as "what is different on Monday", and the profile came back reading as
-     * a daily horoscope. The shared voice rules are written for one and say "today" nine
-     * times, so this prompt has to say the opposite louder than they say it.
-     */
     it("asks for a person rather than a day", () => {
         const prompt = buildPrompt(input);
 
         assert.match(prompt, /A PERSON, NOT A DAY/u);
         assert.match(prompt, /There is no today here\./u);
-        assert.match(prompt, /Present tense, and permanent\./u);
-        assert.match(prompt, /This is analysis, not a plan\./u);
-        assert.match(prompt, /never end on a lesson/u);
+        assert.match(prompt, /This is analysis, not advice\./u);
     });
 
     /**
-     * The collision device, as a test. Two sections handed the same sign-up answer write
-     * the same observation twice — that was the original complaint about this profile, and
-     * `careerStage` landed in two briefs at once while this was being rewritten.
+     * Checked on the part briefs alone: the interpolated voice rules legitimately say
+     * "today" while banning it.
      */
-    it("gives each sign-up answer to exactly one section", () => {
-        const briefs = buildPrompt(input).split("SECTIONS")[1].split("OUTPUT")[0];
+    it("never briefs a part to be about a day", () => {
+        const briefs = part(buildPrompt(input), "PART 1", "HOW TO WRITE IT");
 
-        for (const fact of ["do my research", "changing field", "in a relationship", "career, self development"]) {
-            const hits = briefs.split(fact).length - 1;
-
-            assert.equal(hits, 1, `"${fact}" appears ${hits}× in the section briefs, expected once`);
+        for (const daily of [/\btoday\b/iu, /\bthis week\b/iu, /\bright now\b/iu]) {
+            assert.doesNotMatch(briefs, daily, `part briefs must not ask for ${daily.source}`);
         }
     });
+});
 
-    /**
-     * The briefs must never ask for an action. Checked on the section briefs alone: the
-     * interpolated voice rules legitimately say "today" while banning it, and the ban
-     * block quotes the banned words to ban them.
-     */
-    it("never briefs a section to hand out advice", () => {
-        const briefs = buildPrompt(input).split("SECTIONS")[1].split("HOW TO WRITE IT")[0];
+/** A well-formed answer for these facts, for the schema tests to break. */
+const answer = (shape: ProfileFacts) => ({
+    context: {
+        corePatterns: [{ text: "Decides slowly.", points: ["sun", "saturn"] }],
+        innerTensions: [],
+        emotionalPatterns: [],
+        relationshipPatterns: [],
+        workPatterns: [],
+    },
+    overview: {
+        sun: { keyword: "Curious", text: "You collect ideas." },
+        moon: { keyword: "Detached", text: "You feel it later." },
+        ...(shape.risingSign ? { rising: { keyword: "Warm", text: "Rooms like you." } } : {}),
+        element: { text: "You think first." },
+        modality: { text: "You adapt." },
+        planets: Object.fromEntries(shape.keyPlanets.map(({ planet }) => [planet, { text: "Something." }])),
+    },
+    signature: { summary: ["How it fits together.", "Where it shows."] },
+});
 
-        for (const daily of [/\btoday\b/iu, /\bthis week\b/iu, /\bright now\b/iu, /act on/iu]) {
-            assert.doesNotMatch(briefs, daily, `section briefs must not ask for ${daily.source}`);
-        }
+describe("buildAnswerSchema", () => {
+    it("accepts an answer keyed by exactly the selected planets", () => {
+        assert.ok(buildAnswerSchema(facts).safeParse(answer(facts)).success);
+    });
+
+    it("has no Rising card and no Ascendant point without a birth time", () => {
+        const schema = buildAnswerSchema(factsWithoutTime);
+        const withAscendant = answer(factsWithoutTime);
+        withAscendant.context.corePatterns[0].points = ["ascendant"];
+
+        assert.ok(schema.safeParse(answer(factsWithoutTime)).success);
+        assert.ok(!schema.safeParse(withAscendant).success);
+    });
+
+    it("rejects an answer missing one of the selected planets", () => {
+        const broken = answer(facts);
+        delete broken.overview.planets[facts.keyPlanets[0].planet];
+
+        assert.ok(!buildAnswerSchema(facts).safeParse(broken).success);
+    });
+});
+
+describe("buildOverview", () => {
+    it("keeps every fact when the model failed", () => {
+        const overview = buildOverview(facts, null);
+
+        assert.ok(personalityOverviewSchema.safeParse(overview).success);
+        assert.equal(overview.sun.sign, "gemini");
+        assert.equal(overview.rising?.sign, "leo");
+        assert.equal(overview.keyPlanets.length, 3);
+        assert.equal(overview.sun.text, "");
+        assert.deepEqual(overview.signature.summary, []);
+    });
+
+    it("stores a null Rising card without a birth time", () => {
+        assert.equal(buildOverview(factsWithoutTime, null).rising, null);
     });
 });

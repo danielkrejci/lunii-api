@@ -2,3 +2,5 @@ node_modules
 .env*
 .idea
 dist
+# Local LLM model benchmark (see model-bench/README.md)
+model-bench

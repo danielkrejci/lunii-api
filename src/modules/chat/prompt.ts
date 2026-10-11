@@ -354,7 +354,7 @@ ${CHAT_RULES}
 
 ${buildIdentityBlock(input.reader)}
 
-${buildReaderBlock(input.reader)}
+${buildReaderBlock(input.reader, "chat")}
 
 ${buildChartBlock(input.reader.birthChart)}`;
 }
