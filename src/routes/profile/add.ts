@@ -97,6 +97,11 @@ export default (async (fastify) => {
                     personalityProfile: personalityOverviewSchema,
                     personalityContext: personalityContextSchema.nullable(),
                     personalityProfileInput: z.string().min(1, "Please select your personality profile input."),
+                    /**
+                     * False when the reader removed the Google photo they were shown, or
+                     * picked their own (uploaded right after) — then there is nothing to copy.
+                     */
+                    useProviderImage: z.boolean().optional(),
                 }),
                 response: {
                     200: z.object({
@@ -176,7 +181,7 @@ export default (async (fastify) => {
                  * removed, and an anonymous reader who links Google afterwards has no
                  * `user.image` to take it from.
                  */
-                if (session.user.image) {
+                if (session.user.image && request.body.useProviderImage !== false) {
                     image = await importProviderImage(session.user.id, session.user.image);
                 }
 

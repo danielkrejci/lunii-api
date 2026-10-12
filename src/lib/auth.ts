@@ -3,31 +3,13 @@ import { betterAuth, BetterAuthOptions } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { anonymous, customSession } from "better-auth/plugins";
 import { desc, eq } from "drizzle-orm";
-import { importPKCS8, SignJWT } from "jose";
 
 import { db } from "../db";
 import * as schema from "../db/schema";
 import { account, profile } from "../db/schema";
 import { appEnv } from "../env/appEnv";
-import { deleteUserImages } from "../modules/profile/images";
-
-export async function generateAppleClientSecret() {
-    const key = await importPKCS8(appEnv.APPLE_PRIVATE_KEY, "ES256");
-
-    const now = Math.floor(Date.now() / 1000);
-
-    return await new SignJWT({})
-        .setProtectedHeader({
-            alg: "ES256",
-            kid: appEnv.APPLE_KEY_ID,
-        })
-        .setIssuer(appEnv.APPLE_TEAM_ID)
-        .setSubject(appEnv.APPLE_CLIENT_ID)
-        .setAudience("https://appleid.apple.com")
-        .setIssuedAt(now)
-        .setExpirationTime(now + 180 * 24 * 60 * 60)
-        .sign(key);
-}
+import { deleteUserData } from "../modules/account/delete";
+import { generateAppleClientSecret } from "./apple";
 
 const config = {
     user: {
@@ -38,11 +20,11 @@ const config = {
         deleteUser: {
             enabled: true,
             /**
-             * The cascades take every row, but not the photos in R2 those rows point at.
-             * Read before the delete, while the rows still say where the files are.
+             * The cascades take every row; this is the rest — photos in R2, the Apple
+             * grant, our copy of the RevenueCat webhooks.
              */
             beforeDelete: async (user) => {
-                await deleteUserImages(user.id);
+                await deleteUserData(user.id);
             },
         },
     },
@@ -142,6 +124,13 @@ const config = {
             enabled: true,
             maxAge: 60 * 5,
         },
+        /**
+         * Off: no "signed in recently" check for sensitive endpoints (deleting the account).
+         * Sessions live for 400 days and keep their `createdAt`, so the default 24h would
+         * refuse nearly everyone — and there is no password to prove it again with, only
+         * Apple, Google or an anonymous session. The app's confirmation guards it instead.
+         */
+        freshAge: 0,
     },
     rateLimit: {
         window: 10,
