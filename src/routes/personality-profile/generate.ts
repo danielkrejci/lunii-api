@@ -13,7 +13,16 @@ import { computeNatalChart, NatalChart } from "../../modules/astro";
 import { generatePersonalityProfile } from "../../modules/personality/generate";
 import { personalityContextSchema, personalityOverviewSchema } from "../../modules/personality/schema";
 import { sendInternalError } from "../../utils/errors";
-import { Gender, Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
+import { getLanguageByIso } from "../../utils/languageUtils";
+import { Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
+import {
+    AREAS_OF_INTEREST,
+    BELIEF_LEVELS,
+    CAREER_STAGES,
+    CONTENT_PREFERENCES,
+    DECISION_STYLES,
+    RELATIONSHIP_STATUSES,
+} from "../../utils/profileOptions";
 import { errorResponseBuilder } from "../../utils/rateLimitResponse";
 import { MIN_AGE } from "../profile/add";
 
@@ -50,11 +59,8 @@ export default (async (fastify) => {
         {
             schema: {
                 body: z.object({
-                    language: z.string().min(1, "Please select your preferred language."),
-                    gender: z
-                        .string()
-                        .min(1, "Please select your gender.")
-                        .refine((value) => Genders.includes(value as Gender), "Invalid gender."),
+                    language: z.string().refine((iso) => getLanguageByIso(iso) !== undefined, "Unsupported language."),
+                    gender: z.enum(Genders, { message: "Please select your gender." }),
                     birthDate: z
                         .string()
                         .regex(/^\d{4}-\d{2}-\d{2}$/u, "Birth date must be YYYY-MM-DD.")
@@ -99,15 +105,22 @@ export default (async (fastify) => {
                         .string()
                         .min(1, "Please select your Sun sign.")
                         .refine((value) => SINGS_MAP.includes(value as ZodiacSign), "Invalid sign."),
-                    relationshipStatus: z.string().min(1, "Please select the option that best suits you."),
-                    careerStage: z.string().min(1, "Please select the option that best suits you."),
-                    decisionStyle: z.string().min(1, "Please select the option that best suits you."),
+                    relationshipStatus: z.enum(RELATIONSHIP_STATUSES, {
+                        message: "Please select the option that best suits you.",
+                    }),
+                    careerStage: z.enum(CAREER_STAGES, { message: "Please select the option that best suits you." }),
+                    decisionStyle: z.enum(DECISION_STYLES, {
+                        message: "Please select the option that best suits you.",
+                    }),
                     areasOfInterest: z
-                        .array(z.string())
+                        .array(z.enum(AREAS_OF_INTEREST))
                         .min(1, "Please select 1 to 3 options that best suit you.")
-                        .max(3, "You can select up to 3 areas of interest."),
-                    contentPreference: z.string().min(1, "Please select your content preference."),
-                    beliefLevel: z.string().min(1, "Please select your belief level."),
+                        .max(3, "You can select up to 3 areas of interest.")
+                        .refine((areas) => new Set(areas).size === areas.length, "Each area can be selected once."),
+                    contentPreference: z.enum(CONTENT_PREFERENCES, {
+                        message: "Please select your content preference.",
+                    }),
+                    beliefLevel: z.enum(BELIEF_LEVELS, { message: "Please select your belief level." }),
                 }),
                 response: {
                     200: z.object({
@@ -212,7 +225,7 @@ export default (async (fastify) => {
                     contentPreference: request.body.contentPreference,
                     beliefLevel: request.body.beliefLevel,
                     languageIso: request.body.language,
-                    gender: request.body.gender as Gender,
+                    gender: request.body.gender,
                 });
 
                 /**

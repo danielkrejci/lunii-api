@@ -14,12 +14,22 @@ import { computeNatalChart, EphemerisError } from "../../modules/astro";
 import { personalityContextSchema, personalityOverviewSchema } from "../../modules/personality/schema";
 import { deleteStoredImage, importProviderImage } from "../../modules/profile/images";
 import { isUniqueViolation, sendInternalError } from "../../utils/errors";
-import { Gender, Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
+import { getLanguageByIso } from "../../utils/languageUtils";
+import { Genders, SINGS_MAP, ZodiacSign } from "../../utils/natalUtils";
+import {
+    AREAS_OF_INTEREST,
+    BELIEF_LEVELS,
+    CAREER_STAGES,
+    CONTENT_PREFERENCES,
+    DECISION_STYLES,
+    REFERRERS,
+    RELATIONSHIP_STATUSES,
+} from "../../utils/profileOptions";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-export const MIN_AGE = 15;
+export const MIN_AGE = 13;
 
 export default (async (fastify) => {
     fastify.withTypeProvider<ZodTypeProvider>().post(
@@ -28,11 +38,8 @@ export default (async (fastify) => {
             schema: {
                 body: z.object({
                     name: z.string().min(1, "Please enter your name.").max(60, "Name must be 60 characters or fewer."),
-                    referrer: z.string().min(1, "Please select an option."),
-                    gender: z
-                        .string()
-                        .min(1, "Please select your gender.")
-                        .refine((value) => Genders.includes(value as Gender), "Invalid gender."),
+                    referrer: z.enum(REFERRERS, { message: "Please select an option." }),
+                    gender: z.enum(Genders, { message: "Please select your gender." }),
                     birthDate: z
                         .string()
                         .regex(/^\d{4}-\d{2}-\d{2}$/u, "Birth date must be YYYY-MM-DD.")
@@ -66,7 +73,7 @@ export default (async (fastify) => {
                         .max(180)
                         .refine((value) => String(value).length > 0, "Please enter your birth place."),
                     country: z.string().min(1, "Please select your country."),
-                    language: z.string().min(1, "Please select your preferred language."),
+                    language: z.string().refine((iso) => getLanguageByIso(iso) !== undefined, "Unsupported language."),
                     sunSign: z
                         .string()
                         .min(1, "Please select your Sun sign.")
@@ -80,15 +87,22 @@ export default (async (fastify) => {
                         .string()
                         .refine((value) => SINGS_MAP.includes(value as ZodiacSign), "Invalid sign.")
                         .nullable(),
-                    relationshipStatus: z.string().min(1, "Please select the option that best suits you."),
-                    careerStage: z.string().min(1, "Please select the option that best suits you."),
-                    decisionStyle: z.string().min(1, "Please select the option that best suits you."),
+                    relationshipStatus: z.enum(RELATIONSHIP_STATUSES, {
+                        message: "Please select the option that best suits you.",
+                    }),
+                    careerStage: z.enum(CAREER_STAGES, { message: "Please select the option that best suits you." }),
+                    decisionStyle: z.enum(DECISION_STYLES, {
+                        message: "Please select the option that best suits you.",
+                    }),
                     areasOfInterest: z
-                        .array(z.string())
+                        .array(z.enum(AREAS_OF_INTEREST))
                         .min(1, "Please select 1 to 3 options that best suit you.")
-                        .max(3, "You can select up to 3 areas of interest."),
-                    contentPreference: z.string().min(1, "Please select your content preference."),
-                    beliefLevel: z.string().min(1, "Please select your belief level."),
+                        .max(3, "You can select up to 3 areas of interest.")
+                        .refine((areas) => new Set(areas).size === areas.length, "Each area can be selected once."),
+                    contentPreference: z.enum(CONTENT_PREFERENCES, {
+                        message: "Please select your content preference.",
+                    }),
+                    beliefLevel: z.enum(BELIEF_LEVELS, { message: "Please select your belief level." }),
                     /**
                      * As `personality-profile/generate` returned them. Checked against the
                      * shapes rather than taken as strings: the client only relays them, so
@@ -190,7 +204,7 @@ export default (async (fastify) => {
                     name: request.body.name,
                     image,
                     referrer: request.body.referrer,
-                    gender: request.body.gender as Gender,
+                    gender: request.body.gender,
                     birthDate: request.body.birthDate,
                     birthTime: request.body.birthTime,
                     birthPlace: request.body.birthPlace,

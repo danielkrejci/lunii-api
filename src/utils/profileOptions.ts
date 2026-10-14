@@ -2,9 +2,20 @@
  * The answers the profile questions accept — the codes, not the labels.
  *
  * A copy of the app's `form/profileOptions.ts`, and it has to stay one: the app offers
- * these and the server refuses anything else. Onboarding stored them unchecked, so rows
- * written before this list existed may hold other strings; only updates are held to it.
+ * these and the server refuses anything else — at onboarding (`personality-profile/generate`,
+ * `profile/add`) and on every later edit (`profile/update`) alike.
  */
+
+export const REFERRERS = [
+    "friends_or_family",
+    "tiktok",
+    "instagram",
+    "app_store",
+    "internet_search",
+    "x",
+    "youtube",
+    "other",
+] as const;
 
 export const RELATIONSHIP_STATUSES = [
     "single",

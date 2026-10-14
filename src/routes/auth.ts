@@ -1,71 +1,10 @@
-import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
-import { eq } from "drizzle-orm";
+import { toNodeHandler } from "better-auth/node";
 import { FastifyInstance, FastifyPluginAsync } from "fastify";
-import { ZodTypeProvider } from "fastify-type-provider-zod";
-import z from "zod";
 
-import { profile } from "../db/schema";
 import { auth } from "../lib/auth";
-import { sendInternalError } from "../utils/errors";
 
 export default (async (fastify: FastifyInstance) => {
     const authHandler = toNodeHandler(auth.handler);
-
-    // Custom route with default body parsing enabled
-    await fastify.withTypeProvider<ZodTypeProvider>().post(
-        "/auth/notification-token",
-        {
-            schema: {
-                body: z.object({
-                    token: z.string(),
-                }),
-                response: {
-                    200: z.object({
-                        data: z.boolean(),
-                    }),
-                    401: z.object({
-                        error: z.object({
-                            code: z.string(),
-                            message: z.string(),
-                        }),
-                    }),
-                    500: z.object({
-                        error: z.object({
-                            code: z.string(),
-                            message: z.string(),
-                        }),
-                    }),
-                },
-            },
-        },
-        async (request, reply) => {
-            const session = await auth.api.getSession({
-                headers: fromNodeHeaders(request.headers),
-            });
-
-            if (!session) {
-                return reply.status(401).send({
-                    error: {
-                        code: "unauthorized",
-                        message: "User must be logged in to access this resource.",
-                    },
-                });
-            }
-
-            try {
-                await fastify.db
-                    .update(profile)
-                    .set({ notificationToken: request.body.token })
-                    .where(eq(profile.userId, session.user.id));
-
-                reply.status(200).send({
-                    data: true,
-                });
-            } catch (error: unknown) {
-                return sendInternalError(request, reply, error, "Failed to update notification token");
-            }
-        }
-    );
 
     // sub-context for better-auth routes that need raw stream
     await fastify.register(async (childCtx) => {

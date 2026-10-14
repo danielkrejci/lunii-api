@@ -26,6 +26,7 @@ import { PlanetInsightContent } from "../modules/insights/planets";
 import { MoonInsightContent } from "../modules/moon/ai";
 import { MoonVariant } from "../modules/moon/today";
 import { PersonalityContext } from "../modules/personality/schema";
+import { PushPlatform } from "../modules/push/types";
 import { Gender, Relationship, TransitAspects, TransitPlanets, ZodiacSign } from "../utils/natalUtils";
 
 export const aiGenerations = pgTable(
@@ -778,7 +779,6 @@ export const profile = pgTable(
          * on every request.
          */
         lastActiveAt: timestamp("last_active_at"),
-        notificationToken: text("notification_token"),
         country: text("country").notNull(),
         language: text("language").notNull(),
         birthChart: jsonb("birth_chart").$type<NatalChart>().notNull(),
@@ -790,9 +790,41 @@ export const profile = pgTable(
     },
     (table) => [
         index("profile_birth_place_lat_lng_idx").on(table.birthPlaceLat, table.birthPlaceLng),
-        index("profile_notification_token_idx").on(table.notificationToken),
         // The scheduler sweeps by recency every hour; without this it is a full scan.
         index("profile_last_active_at_idx").on(table.lastActiveAt),
+    ]
+);
+
+/**
+ * The Expo push tokens a reader's devices registered — one row per device, so a reader
+ * on a phone and a tablet hears on both.
+ *
+ * Keyed by the token rather than by the reader: a token names an app install, and when
+ * someone signs out and into another account on the same phone the row moves to the new
+ * user instead of notifying both. Rows Expo reports as `DeviceNotRegistered` are deleted
+ * by `processReceipts` in `modules/push`.
+ */
+export const pushTokens = pgTable(
+    "push_token",
+    {
+        id: text()
+            .primaryKey()
+            .notNull()
+            .$defaultFn(() => crypto.randomUUID()),
+        userId: text("user_id")
+            .notNull()
+            .references(() => user.id, { onDelete: "cascade" }),
+        token: text("token").notNull().unique(),
+        platform: text("platform").$type<PushPlatform>().notNull(),
+        createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+        updatedAt: timestamp("updated_at", { withTimezone: true })
+            .defaultNow()
+            .$onUpdate(() => new Date())
+            .notNull(),
+    },
+    (table) => [
+        index("push_token_user_id_idx").on(table.userId),
+        check("push_token_platform_valid", sql`${table.platform} in ('ios', 'android')`),
     ]
 );
 

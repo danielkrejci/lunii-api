@@ -62,12 +62,14 @@ describe("buildPromptLanguageRule", () => {
         assert.match(prose, /read it back once/u);
     });
 
+    /**
+     * No language offered today uses it (Japanese, Korean, Hindi and Indonesian are hidden
+     * until the app is translated), so the rule is checked on a stand-in rather than lost.
+     */
     it("asks for the polite register where the plain form would read as rude", () => {
-        const japanese = getLanguageByIso("ja");
+        assert.ok(czech);
 
-        assert.ok(japanese);
-
-        const rule = buildPromptLanguageRule(japanese, "male");
+        const rule = buildPromptLanguageRule({ ...czech, addressForm: "polite" }, "male");
 
         assert.match(rule, /polite register/u);
         assert.doesNotMatch(rule, /informal second person/u);
@@ -84,9 +86,14 @@ describe("languagesData", () => {
         }
     });
 
-    it("keeps the languages that have politeness levels out of the informal bucket", () => {
-        for (const iso of ["ja", "ko"]) {
-            assert.equal(getLanguageByIso(iso)?.addressForm, "polite", `${iso} must not be addressed informally`);
-        }
+    /**
+     * The app offers the same list and sends the iso back as the profile's language, so a
+     * code that differs on either side is a reader who cannot finish onboarding.
+     */
+    it("offers exactly the languages the app is translated into", () => {
+        assert.deepEqual(
+            languagesData.map((language) => language.iso),
+            ["en", "cs", "de", "es", "pt-BR", "fr", "it", "pl"]
+        );
     });
 });
